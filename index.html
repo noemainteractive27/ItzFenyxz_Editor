@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ITZFENYXZ Editor</title>
+  <link rel="icon" href="icon.png" type="image/png">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <img class="brand-icon" src="icon.png" alt="">
+        <div class="brand-copy"><span class="brand-mark">ITZFENYXZ</span><span class="brand-sub">EDITOR</span></div>
+      </div>
+      <div class="toolbar">
+        <button id="openBtn" title="Open model">Open</button>
+        <button id="saveBtn" title="Save update file" disabled>Save</button>
+        <button id="saveAsBtn" title="Save update file as" disabled>Save As</button>
+      </div>
+      <div class="toolbar">
+        <button id="moveBtn" title="Move tool">Move</button>
+        <button id="rotateBtn" title="Rotate tool">Rotate</button>
+        <button id="scaleBtn" title="Scale tool">Scale</button>
+        <span class="separator"></span>
+        <button id="spaceBtn" title="Toggle local/world transform space">World</button>
+        <span class="separator"></span>
+        <div id="axisToolbar" class="axis-toolbar" aria-label="Transform axis">
+          <button class="axis-button active" data-axis="free" title="Free / Uniform">Free</button>
+          <button class="axis-button axis-x-button" data-axis="0" title="Constrain X">X</button>
+          <button class="axis-button axis-y-button" data-axis="1" title="Constrain Y">Y</button>
+          <button class="axis-button axis-z-button" data-axis="2" title="Constrain Z">Z</button>
+        </div>
+        <select id="transformSpeed" title="Transform sensitivity">
+          <option value="0.25">Fine</option>
+          <option value="1" selected>Normal</option>
+          <option value="3">Coarse</option>
+        </select>
+      </div>
+      <div class="toolbar">
+        <button id="frontBtn" title="Front view">Front</button>
+        <button id="rightBtn" title="Right view">Right</button>
+        <button id="topBtn" title="Top view">Top</button>
+        <button id="frameBtn" title="Frame selected">Frame</button>
+      </div>
+      <button id="installBtn" class="help-button hidden" title="Install as an app">Install App</button>
+      <button id="helpBtn" class="help-button" title="Open the help PDF">Help</button>
+      <div id="fileIndicator" class="file-indicator">No model loaded</div>
+      <input id="fileInput" type="file" accept=".3ds,.itzfenyxz" hidden>
+    </header>
+
+    <aside class="left-panel">
+      <section class="panel-section">
+        <div class="panel-title">SCENE</div>
+        <div id="hierarchy" class="hierarchy empty"><div class="empty-message">Open a .3ds or .itzfenyxz model.</div></div>
+      </section>
+      <section class="panel-section">
+        <div class="panel-title">LAYERS</div>
+        <label class="layer-row"><input id="geometryLayer" type="checkbox" checked disabled><span>Geometry</span></label>
+        <label class="layer-row"><input id="colliderLayer" type="checkbox" checked disabled><span>Colliders</span></label>
+        <label class="layer-row"><input id="gridLayer" type="checkbox" checked><span>Grid</span></label>
+      </section>
+    </aside>
+
+    <main class="viewport-shell" id="viewportShell">
+      <canvas id="viewport" tabindex="0"></canvas>
+      <div id="viewportBadge" class="viewport-badge">WORLD</div>
+      <div class="axis-legend"><span class="axis-x">X</span><span class="axis-y">Y</span><span class="axis-z">Z</span></div>
+      <div id="transformHint" class="transform-hint hidden"></div>
+      <div id="emptyViewport" class="empty-viewport">
+        <img src="icon.png" alt="">
+        <strong>ITZFENYXZ Editor</strong>
+        <span>Open a recovered .3ds model to create an ITZFENYXZ update.</span>
+      </div>
+      <div id="toast" class="toast"></div>
+      <div id="fatalBanner" class="fatal-banner hidden"></div>
+    </main>
+
+    <aside class="right-panel">
+      <section class="panel-section">
+        <div class="panel-title">OBJECT</div>
+        <div class="info-row"><span>Object ID</span><b id="objectIdValue">—</b></div>
+        <div class="info-row"><span>Source</span><b id="sourceValue">—</b></div>
+        <div class="info-row"><span>Selected</span><b id="selectedValue">—</b></div>
+      </section>
+      <section class="panel-section transform-section">
+        <div class="panel-title">TRANSFORM</div>
+        <div class="vector-group">
+          <div class="vector-label">Position</div>
+          <label>X<input data-transform="position" data-axis="0" type="number" step="0.01" disabled></label>
+          <label>Y<input data-transform="position" data-axis="1" type="number" step="0.01" disabled></label>
+          <label>Z<input data-transform="position" data-axis="2" type="number" step="0.01" disabled></label>
+        </div>
+        <div class="vector-group">
+          <div class="vector-label">Rotation °</div>
+          <label>X<input data-transform="rotation" data-axis="0" type="number" step="1" disabled></label>
+          <label>Y<input data-transform="rotation" data-axis="1" type="number" step="1" disabled></label>
+          <label>Z<input data-transform="rotation" data-axis="2" type="number" step="1" disabled></label>
+        </div>
+        <div class="vector-group">
+          <div class="vector-label">Scale</div>
+          <label>X<input data-transform="scale" data-axis="0" type="number" step="0.01" disabled></label>
+          <label>Y<input data-transform="scale" data-axis="1" type="number" step="0.01" disabled></label>
+          <label>Z<input data-transform="scale" data-axis="2" type="number" step="0.01" disabled></label>
+        </div>
+        <button id="resetTransformBtn" class="wide" disabled>Reset Transform</button>
+      </section>
+      <section class="panel-section">
+        <div class="panel-title">COLLISION</div>
+        <div class="info-row"><span>Type</span><b>Box Collider</b></div>
+        <div class="info-row"><span>State</span><b id="colliderStateValue">—</b></div>
+        <div class="info-row"><span>Base Size</span><b id="colliderSizeValue">—</b></div>
+        <button id="showCollidersBtn" class="wide" disabled>Hide Colliders</button>
+      </section>
+      <section class="panel-section diagnostics-section">
+        <div class="panel-title">SOURCE DIAGNOSTICS</div>
+        <div class="info-row"><span>Geometry Objects</span><b id="geometryObjectsValue">—</b></div>
+        <div class="info-row"><span>Vertices</span><b id="geometryVerticesValue">—</b></div>
+        <div class="info-row"><span>Triangles</span><b id="geometryTrianglesValue">—</b></div>
+        <div class="info-row"><span>Markers Removed</span><b id="markerCountValue">—</b></div>
+        <div class="info-row"><span>Collider Proxy Removed</span><b id="colliderProxyValue">—</b></div>
+        <div class="info-row"><span>Calibration</span><b id="calibrationValue">—</b></div>
+        <div class="info-row"><span>Matrix Recovery</span><b id="matrixRecoveryValue">—</b></div>
+        <div id="sourceWarning" class="source-warning hidden"></div>
+      </section>
+    </aside>
+
+    <footer class="statusbar">
+      <span id="statusText">Ready.</span>
+      <span class="status-spacer"></span>
+      <span id="historyStatus">Undo 0 / Redo 0</span>
+      <span id="dirtyStatus">Saved</span>
+    </footer>
+  </div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

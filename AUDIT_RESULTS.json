@@ -1,0 +1,305 @@
+{
+  "passed": 55,
+  "total": 55,
+  "checks": [
+    {
+      "name": "startup ready",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "WebGL viewport",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "no startup fatal error",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "all original controls present",
+      "ok": true,
+      "detail": 33
+    },
+    {
+      "name": "test_complete.3ds opens",
+      "ok": true,
+      "detail": "Imported test_complete.3ds — 1 geometry object(s), 3 vertices, 1 triangles, 13 collider-proxy unit(s) removed"
+    },
+    {
+      "name": "test_complete.3ds calibration",
+      "ok": true,
+      "detail": "Exact UV proxy"
+    },
+    {
+      "name": "test_complete.3ds save enabled",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "test_partial.3ds opens",
+      "ok": true,
+      "detail": "Imported test_partial.3ds — 1 geometry object(s), 3 vertices, 1 triangles, 13 collider-proxy unit(s) removed"
+    },
+    {
+      "name": "test_partial.3ds calibration",
+      "ok": true,
+      "detail": "Exact proxy (geometry recovery)"
+    },
+    {
+      "name": "test_partial.3ds save enabled",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "test_none.3ds opens",
+      "ok": true,
+      "detail": "Imported test_none.3ds — 1 geometry object(s), 3 vertices, 1 triangles, 13 collider-proxy unit(s) removed"
+    },
+    {
+      "name": "test_none.3ds calibration",
+      "ok": true,
+      "detail": "Exact proxy (geometry recovery)"
+    },
+    {
+      "name": "test_none.3ds save enabled",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "drag and drop open",
+      "ok": true,
+      "detail": "drop_complete.3ds"
+    },
+    {
+      "name": "Ctrl+O open",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "hierarchy has root geometry collider",
+      "ok": true,
+      "detail": 3
+    },
+    {
+      "name": "inspector transform node 0",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "inspector transform node 1",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "inspector transform node 2",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "reset transform",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Ctrl+Z undo reset",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Ctrl+Y redo reset",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Move tool drag changes transform",
+      "ok": true,
+      "detail": [
+        4.0,
+        4.8807
+      ]
+    },
+    {
+      "name": "undo Move tool",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Rotate tool drag changes transform",
+      "ok": true,
+      "detail": [
+        25.0,
+        68.5536
+      ]
+    },
+    {
+      "name": "Scale tool drag changes transform",
+      "ok": true,
+      "detail": [
+        1.4,
+        1.5318
+      ]
+    },
+    {
+      "name": "G shortcut",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "X axis shortcut",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "0 free axis shortcut",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Escape cancels tool",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "R shortcut",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "S shortcut",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "local/world toggle",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "camera controls no fatal error",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "layer checkboxes off",
+      "ok": true,
+      "detail": [
+        false,
+        false,
+        false
+      ]
+    },
+    {
+      "name": "Show/Hide Colliders button",
+      "ok": true,
+      "detail": [
+        "Hide Colliders",
+        "Show Colliders"
+      ]
+    },
+    {
+      "name": "C shortcut toggles colliders",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "F/1/3/7 shortcuts no fatal error",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Delete Geometry",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Undo Geometry delete",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Delete Collider",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Undo Collider delete",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Redo Collider delete",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Delete root removes both children",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Undo root delete restores both",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Help opens packaged PDF",
+      "ok": true,
+      "detail": "https://example.invalid/itzfenyxz/help.pdf"
+    },
+    {
+      "name": "Install button appears",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "Install button hides after prompt",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "invalid sheared BoxCollider is rejected",
+      "ok": true,
+      "detail": "Save: This Root/Collider transform would create a sheared or mirrored box that Unity cannot reproduce exactly. Adjust rotation/scale or delete the collider."
+    },
+    {
+      "name": "Save As downloads .itzfenyxz",
+      "ok": true,
+      "detail": [
+        "test_none.itzfenyxz",
+        1606
+      ]
+    },
+    {
+      "name": "save marks clean",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "saved patch reopens",
+      "ok": true,
+      "detail": "Opened test_none.3ds — 1 geometry object(s), 3 vertices, 1 triangles, 13 collider-proxy unit(s) removed"
+    },
+    {
+      "name": "native Save As and Save handle path",
+      "ok": true,
+      "detail": [
+        1607,
+        1607
+      ]
+    },
+    {
+      "name": "no uncaught page errors",
+      "ok": true,
+      "detail": []
+    },
+    {
+      "name": "no unexpected console errors",
+      "ok": true,
+      "detail": []
+    }
+  ],
+  "page_errors": [],
+  "console_errors": []
+}

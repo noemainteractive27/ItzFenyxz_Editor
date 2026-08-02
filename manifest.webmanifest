@@ -1,0 +1,12 @@
+{
+  "name": "ITZFENYXZ Editor",
+  "short_name": "ITZFENYXZ",
+  "description": "Edit recovered 3DS models and export ITZFENYXZ state patches.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#101316",
+  "theme_color": "#101316",
+  "icons": [{"src":"icon.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]
+}
