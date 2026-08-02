@@ -141,8 +141,10 @@ function positiveScale(t){return t.scale.every(v=>Number.isFinite(v)&&v>1e-7);}
 function sourceIsSaveable(){return !!model&&model.sourceCalibrated;}
 function validateModelForSave(){
   if(!model)throw new Error('No model is loaded.');
-  if(!model.sourceCalibrated)throw new Error('This source has no valid exact collider proxy. Generate the pivot-correct UV proxy in Unity, re-export the FBX and convert it to 3DS again.');
-  if(!/^[A-Z0-9]{5}$/.test(model.sourceToken||''))throw new Error('This source has no valid ITZF identity token. Re-export the prepared FBX from Unity.');
+  if(!model.sourceCalibrated)throw new Error('This source has no valid calibrated collider proxy. Re-export the prepared FBX from Unity and convert it to 3DS again.');
+  // A 3DS converter may destroy the ICxxxxx object name / UV token while the
+  // calibrated proxy geometry still survives. Unity can safely identify the
+  // patch by ObjectId when the token is absent, so saving must not be blocked.
   if(model.colliderPresent){
     if(!positiveScale(model.root)||!positiveScale(model.collider))throw new Error('Root and Box Collider scales must stay positive while the collider exists. Delete the collider first if a mirrored transform is intentional.');
     const base={position:model.colliderBaseCenter,rotation:model.colliderBaseRotation,scale:model.colliderBaseSize};
@@ -478,8 +480,10 @@ function updateSourceDiagnostics(){
   setDiagnosticValue(geometryTrianglesValue,Number(d.triangleCount??model.mesh?.indices?.length/3??0).toLocaleString());
   setDiagnosticValue(markerCountValue,String(legacyMarkers),legacyMarkers>0?'good':'');
   setDiagnosticValue(colliderProxyValue,proxyUnits?`${d.removedProxyObjects||0} object / ${d.removedProxyFaces||0} faces`:'Missing',proxyUnits?'good':'warn');
-  const calibrationLabel=d.calibrationMode==='exact-collider-proxy-endpoints'
-    ?'Exact proxy (endpoint recovery)'
+  const calibrationLabel=d.colliderSource==='geometry-extents-box'
+    ?'Geometry extremes (BoxCollider)'
+    :d.calibrationMode==='exact-collider-proxy-endpoints'
+      ?'Exact proxy (endpoint recovery)'
     :d.calibrationMode==='exact-collider-proxy-geometry'
       ?'Exact proxy (geometry recovery)'
       :String(d.calibrationMode||'').startsWith('exact-collider-proxy')
@@ -541,7 +545,46 @@ function loadParsed(mesh,sourceBytes,manifest,sourceName,kind){
 async function openFile(file){
   if(!file)return;try{if(dirty&&!confirm('Discard unsaved changes?'))return;setStatus(`Opening ${file.name}…`);const bytes=new Uint8Array(await file.arrayBuffer()),ext=file.name.toLowerCase().split('.').pop();if(ext==='3ds'){const mesh=parse3DS(bytes);loadParsed(mesh,bytes,null,file.name,'3ds');}else if(ext==='itzfenyxz'){const data=await decodeITZF(bytes);const mesh=parse3DS(data.source);loadParsed(mesh,data.source,data.manifest,file.name,'itzf');}else throw new Error('Supported formats: .3ds and .itzfenyxz');}catch(e){reportError(e,'Open file');toast('Open failed');setStatus('Open failed');}}
 
-async function saveAs(){if(!model)return;try{validateModelForSave();const bytes=await encodeITZF(manifestFromModel(),model.sourceBytes);const suggested=`${model.objectId}.itzfenyxz`;if(typeof window.showSaveFilePicker==='function'){const h=await window.showSaveFilePicker({suggestedName:suggested,types:[{description:'ITZFENYXZ Model',accept:{'application/octet-stream':['.itzfenyxz']}}]});const w=await h.createWritable();await w.write(bytes);await w.close();saveHandle=h;}else{const blob=new Blob([bytes],{type:'application/octet-stream'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=suggested;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}savedState=persistentState();setDirty();setStatus(`Saved ${suggested}`);toast('Saved .itzfenyxz');}catch(e){if(e?.name!=='AbortError')reportError(e,'Save');}}
+async function saveAs(){
+  if(!model)return;
+  try{
+    validateModelForSave();
+    const suggested=`${model.objectId}.itzfenyxz`;
+    let handle=null;
+
+    // Request the native file handle immediately from the user's click. Doing
+    // this before asynchronous encoding preserves browser user activation.
+    if(typeof window.showSaveFilePicker==='function'){
+      handle=await window.showSaveFilePicker({
+        suggestedName:suggested,
+        types:[{description:'ITZFENYXZ Model',accept:{'application/octet-stream':['.itzfenyxz']}}]
+      });
+    }
+
+    const bytes=await encodeITZF(manifestFromModel(),model.sourceBytes);
+    if(handle){
+      const writable=await handle.createWritable();
+      await writable.write(bytes);
+      await writable.close();
+      saveHandle=handle;
+    }else{
+      const blob=new Blob([bytes],{type:'application/octet-stream'});
+      const link=document.createElement('a');
+      link.href=URL.createObjectURL(blob);
+      link.download=suggested;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(()=>URL.revokeObjectURL(link.href),1000);
+    }
+    savedState=persistentState();
+    setDirty();
+    setStatus(`Saved ${suggested}`);
+    toast('Saved .itzfenyxz');
+  }catch(e){
+    if(e?.name!=='AbortError')reportError(e,'Save');
+  }
+}
 async function save(){if(!model)return;if(!saveHandle)return saveAs();try{validateModelForSave();const bytes=await encodeITZF(manifestFromModel(),model.sourceBytes),w=await saveHandle.createWritable();await w.write(bytes);await w.close();savedState=persistentState();setDirty();setStatus('Saved');toast('Saved');}catch(e){if(e?.name!=='AbortError')reportError(e,'Save');}}
 
 openBtn.addEventListener('click',()=>fileInput.click());fileInput.addEventListener('change',()=>{const f=fileInput.files?.[0];fileInput.value='';openFile(f);});

@@ -1695,13 +1695,23 @@ export function parse3DS(input) {
     calibrationMode=legacyCalibration?'legacy-markers':'none';
   }
 
-  const combined=buildCombinedMesh(coordinateObjects,mapPoint,colliderBase,proxyScan);
+  const recoveredProxyCollider=colliderBase;
+  const combined=buildCombinedMesh(coordinateObjects,mapPoint,recoveredProxyCollider,proxyScan);
 
-  if(!colliderBase){
-    const size=combined.max.map((v,i)=>Math.max(1e-4,v-combined.min[i]));
-    const center=combined.min.map((v,i)=>(v+combined.max[i])/2);
-    colliderBase={center,size,rotation:[0,0,0,1],fromProxy:false};
-  }
+  // The editable BoxCollider is defined from the actual visible Geometry, not
+  // from the converter-dependent proxy pose.  The minimum and maximum Geometry
+  // points are the two authoritative extremes of the model.  This produces the
+  // exact axis-aligned box the player sees in the editor and the same center /
+  // size values that are written to the .itzfenyxz patch for Unity.
+  const geometrySize=combined.max.map((v,i)=>Math.max(1e-4,v-combined.min[i]));
+  const geometryCenter=combined.min.map((v,i)=>(v+combined.max[i])*0.5);
+  colliderBase={
+    center:geometryCenter,
+    size:geometrySize,
+    rotation:[0,0,0,1],
+    fromGeometryBounds:true,
+    proxyRecovered:!!recoveredProxyCollider
+  };
 
   combined.colliderBase=colliderBase;
   combined.sourceToken=sourceToken;
@@ -1727,11 +1737,12 @@ export function parse3DS(input) {
     sourceObjectNames:objects.map(o=>o.name),
     matrixFallbackUsed,
     weldedProxyRecovered:!!proxyScan?.weldedProxy,
-    colliderSource:proxyScan?.endpointFallback
+    colliderSource:'geometry-extents-box',
+    proxyColliderSource:proxyScan?.endpointFallback
       ?'recovered-endpoint-box'
       :proxyScan
         ?'recovered-proxy-mesh'
-        :'geometry-fallback',
+        :'none',
     endpointProxyRecovered:!!proxyScan?.endpointFallback,
     partialUvProxyRecovered:!!proxyScan?.partialUvFallback
   };

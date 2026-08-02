@@ -1,0 +1,43 @@
+ITZFENYXZ Editor 0.9.1 — correção do BoxCollider pelas extremidades da Geometry
+
+REGRA IMPLEMENTADA
+- O proxy IC/UV continua servindo somente para validar a origem e ser removido da Geometry.
+- O BoxCollider editável NÃO usa mais a pose/rotação recuperada do proxy convertido.
+- O BoxCollider é criado a partir dos valores mínimo e máximo da Geometry visível:
+  center = (min + max) / 2
+  size   = max - min
+  rotation = identidade (0, 0, 0, 1)
+- Portanto, os oito cantos do collider coincidem com as extremidades do modelo.
+- O .itzfenyxz exporta exatamente baseCenter, baseSize, baseRotation e o transform editado do Collider.
+
+TESTES EXECUTADOS
+1) DoorMainHouse.3ds
+Geometry min:  (-30.186039, -7.466840, -74.204239)
+Geometry max:  (  0.384076, 80.199203, 145.901108)
+Collider center:(-14.900981, 36.366182, 35.848434)
+Collider size:  ( 30.570115, 87.666044, 220.105347)
+Collider rotation: (0, 0, 0, 1)
+Resultado: os 8 cantos do collider coincidem com min/max da Geometry.
+
+2) SimpleVase.3ds
+Geometry min:  (-20.956703, -30.956711, -105.071495)
+Geometry max:  ( 20.956711,  10.956710,    0.000000)
+Collider center:(  0.000004, -10.000000,  -52.535748)
+Collider size:  ( 41.913414,  41.913421,  105.071495)
+Collider rotation: (0, 0, 0, 1)
+Resultado: os 8 cantos do collider coincidem com min/max da Geometry.
+
+3) Exportação .itzfenyxz
+- Encode e decode v4 executados nos dois modelos.
+- baseCenter e baseSize permaneceram idênticos aos extremos da Geometry.
+- transform de posição/escala do Collider permaneceu intacto.
+- source.calibrated permaneceu true.
+- A ausência do token após conversão 3DS não bloqueia mais o Save quando o ObjectId é preservado.
+
+4) Save As
+- O seletor de arquivo é solicitado antes da codificação assíncrona, preservando a autorização do clique.
+- Sem File System Access API, o editor baixa o .itzfenyxz normalmente.
+
+CACHE
+- Service Worker alterado para itzfenyxz-editor-0.9.1-geometry-extents-collider-v2.
+- Substitua todos os arquivos no GitHub Pages e feche todas as abas/PWA antigas antes de abrir novamente.
