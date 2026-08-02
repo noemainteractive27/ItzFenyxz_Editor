@@ -697,7 +697,7 @@ function canonicalNormalDirection(normal) {
   return n;
 }
 
-function recoverColliderFromProxyGeometry(obj,mapPoint) {
+function recoverColliderFromProxyGeometry(obj,mapPoint,referenceBounds=null) {
   if(!obj||!obj.vertices?.length||!obj.faces?.length)return null;
 
   function attempt(applyObjectMatrix){
@@ -795,9 +795,22 @@ function recoverColliderFromProxyGeometry(obj,mapPoint) {
     };
   }
 
-  // Standard 3DS exporters use MESH_MATRIX as the object's local transform.
-  // A few converters bake it into vertices; keep the second attempt for them.
-  return attempt(true)||attempt(false);
+  const bakedCandidate=attempt(false);
+  const matrixCandidate=obj.meshMatrix?attempt(true):null;
+  if(!bakedCandidate)return matrixCandidate;
+  if(!matrixCandidate)return bakedCandidate;
+
+  // Some converters bake the object transform into vertices and still emit a
+  // non-identity MESH_MATRIX. Other converters leave the vertices local. Both
+  // results are valid boxes, so choose the one that occupies the same space as
+  // the visible model instead of blindly applying the matrix twice.
+  if(referenceBounds){
+    const bakedScore=colliderReferenceScore(bakedCandidate,referenceBounds);
+    const matrixScore=colliderReferenceScore(matrixCandidate,referenceBounds);
+    return matrixScore>bakedScore+0.05?matrixCandidate:bakedCandidate;
+  }
+  // Visible Geometry in this editor is interpreted as baked by default.
+  return bakedCandidate;
 }
 
 function canonicalLegacyMarkerName(value) {
@@ -1049,7 +1062,30 @@ function scanColliderProxy(objects) {
       };
     }
 
-    throw new Error('The collider proxy UV metadata is incomplete and its ICxxxxx object name was not preserved by the 3DS converter.');
+    const taggedObjects=new Set(taggedFaces.map(reference=>reference.obj));
+    if(taggedObjects.size===1){
+      const partialTokenComplete=!tokenCharacters.some(character=>!character);
+      const recoveredToken=partialTokenComplete?tokenCharacters.join(''):'';
+      if(recoveredToken&&checksum!==null){
+        const recoveredChecksum=[...recoveredToken].reduce(
+          (sum,character)=>sum+PROXY_TOKEN_ALPHABET.indexOf(character),0
+        )%PROXY_TOKEN_ALPHABET.length;
+        if(checksum!==recoveredChecksum){
+          throw new Error('The surviving collider proxy UV checksum is invalid.');
+        }
+      }
+      return {
+        token:recoveredToken,
+        taggedFaces,
+        proxyObjectCount:taggedObjects.size,
+        proxyFaceCount,
+        proxyObjects:taggedObjects,
+        geometryFallback:true,
+        partialUvFallback:true
+      };
+    }
+
+    throw new Error('The collider proxy UV metadata is incomplete and no single box proxy object survived the 3DS conversion.');
   }
 
   const token=tokenCharacters.join('');
@@ -1070,7 +1106,7 @@ function scanColliderProxy(objects) {
   return {token,taggedFaces,proxyObjectCount,proxyFaceCount,proxyObjects};
 }
 
-function uniqueMappedFacePoints(faceRefs, tag, mapPoint) {
+function uniqueMappedFacePoints(faceRefs, tag, mapPoint, applyObjectMatrix=true) {
   const points=[];
   const seen=new Set();
   for(const ref of faceRefs){
@@ -1079,7 +1115,7 @@ function uniqueMappedFacePoints(faceRefs, tag, mapPoint) {
     if(!face)continue;
     for(const index of face){
       if(index<0||index>=ref.obj.vertices.length)continue;
-      const sourcePoint=applyMeshMatrix(ref.obj.vertices[index],ref.obj.meshMatrix);
+      const sourcePoint=applyObjectMatrix?applyMeshMatrix(ref.obj.vertices[index],ref.obj.meshMatrix):ref.obj.vertices[index];
       const mapped=mapPoint(sourcePoint);
       const key=mapped.map(v=>Math.round(v*1e6)).join(',');
       if(seen.has(key))continue;
@@ -1134,14 +1170,167 @@ function createWeldedProxyCoordinateMap(welded) {
   ];
 }
 
-function parseExactColliderProxy(scan,mapPoint) {
+
+function mappedObjectBounds(obj,mapPoint,applyObjectMatrix=false){
+  if(!obj?.vertices?.length)return null;
+  const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+  for(const vertex of obj.vertices){
+    const source=applyObjectMatrix?applyMeshMatrix(vertex,obj.meshMatrix):vertex;
+    const point=mapPoint(source);
+    if(!point.every(Number.isFinite))return null;
+    for(let axis=0;axis<3;axis++){
+      min[axis]=Math.min(min[axis],point[axis]);
+      max[axis]=Math.max(max[axis],point[axis]);
+    }
+  }
+  return {min,max,center:min.map((value,index)=>(value+max[index])*0.5),size:max.map((value,index)=>value-min[index])};
+}
+
+function colliderBounds(collider){
+  const corners=exactBoxCorners(collider);
+  if(!corners.length)return null;
+  const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+  for(const point of corners)for(let axis=0;axis<3;axis++){
+    min[axis]=Math.min(min[axis],point[axis]);
+    max[axis]=Math.max(max[axis],point[axis]);
+  }
+  return {min,max,center:min.map((value,index)=>(value+max[index])*0.5),size:max.map((value,index)=>value-min[index])};
+}
+
+
+function combinedMappedBounds(objects,mapPoint,excludedObjects=new Set()){
+  const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+  let count=0;
+  for(const obj of objects||[]){
+    if(excludedObjects?.has(obj)||!obj?.vertices?.length)continue;
+    for(const vertex of obj.vertices){
+      const point=mapPoint(vertex);
+      if(!point.every(Number.isFinite))continue;
+      count++;
+      for(let axis=0;axis<3;axis++){
+        min[axis]=Math.min(min[axis],point[axis]);
+        max[axis]=Math.max(max[axis],point[axis]);
+      }
+    }
+  }
+  if(!count)return null;
+  return {min,max,center:min.map((value,index)=>(value+max[index])*0.5),size:max.map((value,index)=>value-min[index])};
+}
+
+function colliderReferenceScore(collider,referenceBounds){
+  const bounds=colliderBounds(collider);
+  if(!bounds||!referenceBounds)return -Infinity;
+  const diagonal=Math.max(1e-6,vLen(referenceBounds.size));
+  const centerScore=Math.max(0,1-vLen(vSub(bounds.center,referenceBounds.center))/diagonal);
+  const overlapScore=boundsIntersectionRatio(bounds,referenceBounds);
+  const longestCollider=Math.max(...collider.size);
+  const longestReference=Math.max(...referenceBounds.size,1e-6);
+  const lengthScore=Math.max(0,1-Math.abs(Math.log(longestCollider/longestReference))/Math.log(4));
+  return overlapScore*4+centerScore*2+lengthScore;
+}
+
+function boundsIntersectionRatio(a,b){
+  if(!a||!b)return 0;
+  let intersection=1,smaller=1;
+  for(let axis=0;axis<3;axis++){
+    const overlap=Math.max(0,Math.min(a.max[axis],b.max[axis])-Math.max(a.min[axis],b.min[axis]));
+    intersection*=overlap;
+    smaller*=Math.max(1e-9,Math.min(a.size[axis],b.size[axis]));
+  }
+  return intersection/smaller;
+}
+
+function findEndpointColliderProxy(objects,mapPoint){
+  const candidates=[];
+  for(const obj of objects){
+    if(!obj?.vertices?.length||!obj?.faces?.length)continue;
+    if(obj.faces.length<10||obj.faces.length>24)continue;
+    const recovered=recoverColliderFromProxyGeometry(obj,mapPoint);
+    if(!recovered)continue;
+    candidates.push({obj,recovered,bounds:colliderBounds(recovered)});
+  }
+  if(!candidates.length)return null;
+
+  // A real export proxy is a tiny twelve-triangle helper next to substantially
+  // more detailed visible Geometry. This prevents ordinary box-shaped models
+  // from being silently mistaken for collider metadata.
+  const detailedObjects=objects.filter(obj=>
+    obj?.vertices?.length&&obj?.faces?.length&&
+    !candidates.some(candidate=>candidate.obj===obj)&&
+    (obj.faces.length>24||obj.vertices.length>16)
+  );
+  if(!detailedObjects.length)return null;
+
+  let best=null;
+  const scored=[];
+  for(const candidate of candidates){
+    const restPoints=[];
+    for(const obj of objects){
+      if(obj===candidate.obj||!obj?.vertices?.length)continue;
+      for(const vertex of obj.vertices){
+        const point=mapPoint(vertex);
+        if(point.every(Number.isFinite))restPoints.push(point);
+      }
+    }
+    if(!restPoints.length)continue;
+    const restMin=[Infinity,Infinity,Infinity],restMax=[-Infinity,-Infinity,-Infinity];
+    for(const point of restPoints)for(let axis=0;axis<3;axis++){
+      restMin[axis]=Math.min(restMin[axis],point[axis]);
+      restMax[axis]=Math.max(restMax[axis],point[axis]);
+    }
+    const rest={
+      min:restMin,
+      max:restMax,
+      center:restMin.map((value,index)=>(value+restMax[index])*0.5),
+      size:restMax.map((value,index)=>value-restMin[index])
+    };
+    const diagonal=Math.max(1e-6,vLen(rest.size));
+    const centerScore=Math.max(0,1-vLen(vSub(candidate.bounds.center,rest.center))/diagonal);
+    const overlapScore=boundsIntersectionRatio(candidate.bounds,rest);
+    const longestCandidate=Math.max(...candidate.recovered.size);
+    const longestRest=Math.max(...rest.size,1e-6);
+    const lengthScore=Math.max(0,1-Math.abs(Math.log(longestCandidate/longestRest))/Math.log(4));
+    const score=overlapScore*4+centerScore*2+lengthScore;
+    const scoredCandidate={...candidate,score};
+    scored.push(scoredCandidate);
+    if(!best||score>best.score)best=scoredCandidate;
+  }
+
+  if(!best||best.score<2.15)return null;
+  const second=scored
+    .filter(candidate=>candidate.obj!==best.obj)
+    .map(candidate=>candidate.score)
+    .sort((a,b)=>b-a)[0];
+  if(Number.isFinite(second)&&best.score-second<0.15)return null;
+
+  return {
+    token:parseProxyObjectToken(best.obj.name)||'',
+    taggedFaces:[],
+    proxyObjectCount:1,
+    proxyFaceCount:best.obj.faces.length,
+    proxyObjects:new Set([best.obj]),
+    geometryFallback:true,
+    endpointFallback:true,
+    recoveredCollider:best.recovered
+  };
+}
+
+function parseExactColliderProxy(scan,mapPoint,objects=[]) {
   if(!scan)return null;
-  if(!/^[A-Z0-9]{5}$/.test(scan.token||''))throw new Error('The collider proxy has no valid five-character source token.');
+  if(scan.token&&!/^[A-Z0-9]{5}$/.test(scan.token))throw new Error('The collider proxy has an invalid five-character source token.');
+  if(!scan.token&&!scan.geometryFallback)throw new Error('The collider proxy has no valid five-character source token.');
 
   if(scan.geometryFallback){
+    const referenceBounds=combinedMappedBounds(objects,mapPoint,scan.proxyObjects||new Set());
+    if(scan.recoveredCollider){
+      const collider=recoverColliderFromProxyGeometry(
+        [...(scan.proxyObjects||[])][0],mapPoint,referenceBounds
+      )||scan.recoveredCollider;
+      return {...collider,token:scan.token||''};
+    }
     const recovered=[];
     for(const obj of scan.proxyObjects||[]){
-      const collider=recoverColliderFromProxyGeometry(obj,mapPoint);
+      const collider=recoverColliderFromProxyGeometry(obj,mapPoint,referenceBounds);
       if(collider)recovered.push(collider);
     }
     if(!recovered.length){
@@ -1220,33 +1409,54 @@ function parseExactColliderProxy(scan,mapPoint) {
     throw new Error('The collider proxy object was found, but its reserved UV metadata was lost during FBX-to-3DS conversion.');
   }
 
-  const centers={};
-  for(const tag of PROXY_FACE_TAGS){
-    const points=uniqueMappedFacePoints(scan.taggedFaces,tag,mapPoint);
-    if(points.length<3)throw new Error(`Collider proxy side I${tag}${scan.token} is missing or incomplete.`);
-    centers[tag]=vAverage(points);
+  function recoverTaggedProxy(applyObjectMatrix){
+    const centers={};
+    for(const tag of PROXY_FACE_TAGS){
+      const points=uniqueMappedFacePoints(scan.taggedFaces,tag,mapPoint,applyObjectMatrix);
+      if(points.length<3)throw new Error(`Collider proxy side I${tag}${scan.token} is missing or incomplete.`);
+      centers[tag]=vAverage(points);
+    }
+
+    const vx=vSub(centers.XP,centers.XN);
+    const vy=vSub(centers.YP,centers.YN);
+    const vz=vSub(centers.ZP,centers.ZN);
+    const size=[vLen(vx),vLen(vy),vLen(vz)];
+    if(Math.min(...size)<1e-7)throw new Error('The exact collider proxy describes a zero-sized BoxCollider.');
+
+    let nx=vNorm(vx),ny=vNorm(vy),nz=vNorm(vz);
+    const shear=Math.max(Math.abs(vDot(nx,ny)),Math.abs(vDot(nx,nz)),Math.abs(vDot(ny,nz)));
+    if(shear>0.01)throw new Error('The exact collider proxy was distorted into a sheared box during conversion.');
+    const handedness=vDot(vCross(ny,nz),nx);
+    if(Math.abs(handedness)<0.98)throw new Error('The exact collider proxy axes are not orthogonal after conversion.');
+    if(handedness<0)nx=nx.map(value=>-value);
+
+    const midX=vMul(vAdd(centers.XP,centers.XN),0.5);
+    const midY=vMul(vAdd(centers.YP,centers.YN),0.5);
+    const midZ=vMul(vAdd(centers.ZP,centers.ZN),0.5);
+    const center=vAverage([midX,midY,midZ]);
+    const centerError=Math.max(vLen(vSub(midX,center)),vLen(vSub(midY,center)),vLen(vSub(midZ,center)));
+    if(centerError>Math.max(...size)*0.01+1e-4)throw new Error('The exact collider proxy faces no longer share the same center.');
+
+    return {center,size,rotation:quatFromBasis(nx,ny,nz),fromProxy:true,token:scan.token,matrixApplied:applyObjectMatrix};
   }
 
-  const vx=vSub(centers.XP,centers.XN);
-  const vy=vSub(centers.YP,centers.YN);
-  const vz=vSub(centers.ZP,centers.ZN);
-  const size=[vLen(vx),vLen(vy),vLen(vz)];
-  if(Math.min(...size)<1e-7)throw new Error('The exact collider proxy describes a zero-sized BoxCollider.');
-
-  const nx=vNorm(vx),ny=vNorm(vy),nz=vNorm(vz);
-  const shear=Math.max(Math.abs(vDot(nx,ny)),Math.abs(vDot(nx,nz)),Math.abs(vDot(ny,nz)));
-  if(shear>0.01)throw new Error('The exact collider proxy was distorted into a sheared box during conversion.');
-  const handedness=vDot(vCross(ny,nz),nx);
-  if(handedness<0.98)throw new Error('The exact collider proxy was mirrored or its face identities were corrupted.');
-
-  const midX=vMul(vAdd(centers.XP,centers.XN),0.5);
-  const midY=vMul(vAdd(centers.YP,centers.YN),0.5);
-  const midZ=vMul(vAdd(centers.ZP,centers.ZN),0.5);
-  const center=vAverage([midX,midY,midZ]);
-  const centerError=Math.max(vLen(vSub(midX,center)),vLen(vSub(midY,center)),vLen(vSub(midZ,center)));
-  if(centerError>Math.max(...size)*0.01+1e-4)throw new Error('The exact collider proxy faces no longer share the same center.');
-
-  return {center,size,rotation:quatFromBasis(nx,ny,nz),fromProxy:true,token:scan.token};
+  const referenceBounds=combinedMappedBounds(objects,mapPoint,scan.proxyObjects||new Set());
+  const candidates=[];
+  const errors=[];
+  for(const applyObjectMatrix of [false,true]){
+    if(applyObjectMatrix&&!scan.taggedFaces.some(reference=>reference.obj.meshMatrix))continue;
+    try{
+      const candidate=recoverTaggedProxy(applyObjectMatrix);
+      if(!candidates.some(existing=>
+        vLen(vSub(existing.center,candidate.center))<1e-5&&
+        existing.size.every((value,index)=>Math.abs(value-candidate.size[index])<1e-5)
+      ))candidates.push(candidate);
+    }catch(error){errors.push(error);}
+  }
+  if(!candidates.length)throw errors[0]||new Error('The exact collider proxy could not be recovered.');
+  if(candidates.length===1)return candidates[0];
+  candidates.sort((a,b)=>colliderReferenceScore(b,referenceBounds)-colliderReferenceScore(a,referenceBounds));
+  return candidates[0];
 }
 
 function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
@@ -1425,7 +1635,7 @@ export function parse3DS(input) {
   if(!objects.length)throw new Error('3DS contains no triangle-mesh objects.');
   if(masterScale!==1)for(const obj of objects)for(const v of obj.vertices){v[0]*=masterScale;v[1]*=masterScale;v[2]*=masterScale;}
 
-  const proxyScan=scanColliderProxy(objects);
+  let proxyScan=scanColliderProxy(objects);
   const legacyScan=scanLegacyMarkers(objects);
   const hasLegacyCalibration=[LEGACY.ORIGIN,LEGACY.AXIS_X,LEGACY.AXIS_Y,LEGACY.AXIS_Z].some(name=>!!findLegacyNamed(legacyScan.markers,name));
 
@@ -1462,16 +1672,22 @@ export function parse3DS(input) {
       ? weldedCoordinateMap
       : p=>legacyToEditor(p[0],p[1],p[2]);
 
+  if(!proxyScan)proxyScan=findEndpointColliderProxy(objects,mapPoint);
+
   let colliderBase=null;
   let sourceToken='';
   let sourceCalibrated=false;
   let calibrationMode='none';
 
   if(proxyScan){
-    colliderBase=parseExactColliderProxy(proxyScan,mapPoint);
+    colliderBase=parseExactColliderProxy(proxyScan,mapPoint,objects);
     sourceToken=proxyScan.token;
     sourceCalibrated=true;
-    calibrationMode=proxyScan.geometryFallback?'exact-collider-proxy-geometry':'exact-collider-proxy';
+    calibrationMode=proxyScan.endpointFallback
+      ?'exact-collider-proxy-endpoints'
+      :proxyScan.geometryFallback
+        ?'exact-collider-proxy-geometry'
+        :'exact-collider-proxy';
   }else{
     colliderBase=parseLegacyCollider(coordinateLegacyMarkers,mapPoint);
     sourceToken=parseLegacyIdentityToken(coordinateLegacyMarkers);
@@ -1511,7 +1727,13 @@ export function parse3DS(input) {
     sourceObjectNames:objects.map(o=>o.name),
     matrixFallbackUsed,
     weldedProxyRecovered:!!proxyScan?.weldedProxy,
-    colliderSource:proxyScan?'recovered-proxy-mesh':'geometry-fallback'
+    colliderSource:proxyScan?.endpointFallback
+      ?'recovered-endpoint-box'
+      :proxyScan
+        ?'recovered-proxy-mesh'
+        :'geometry-fallback',
+    endpointProxyRecovered:!!proxyScan?.endpointFallback,
+    partialUvProxyRecovered:!!proxyScan?.partialUvFallback
   };
   return combined;
 }

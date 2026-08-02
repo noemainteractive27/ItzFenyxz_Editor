@@ -138,7 +138,7 @@ function matrixBasisIsExactBox(m){
   return V3.dot(V3.cross(ny,nz),nx)>=0.999;
 }
 function positiveScale(t){return t.scale.every(v=>Number.isFinite(v)&&v>1e-7);}
-function sourceIsSaveable(){return !!model&&model.sourceCalibrated&&/^[A-Z0-9]{5}$/.test(model.sourceToken||'');}
+function sourceIsSaveable(){return !!model&&model.sourceCalibrated;}
 function validateModelForSave(){
   if(!model)throw new Error('No model is loaded.');
   if(!model.sourceCalibrated)throw new Error('This source has no valid exact collider proxy. Generate the pivot-correct UV proxy in Unity, re-export the FBX and convert it to 3DS again.');
@@ -478,11 +478,18 @@ function updateSourceDiagnostics(){
   setDiagnosticValue(geometryTrianglesValue,Number(d.triangleCount??model.mesh?.indices?.length/3??0).toLocaleString());
   setDiagnosticValue(markerCountValue,String(legacyMarkers),legacyMarkers>0?'good':'');
   setDiagnosticValue(colliderProxyValue,proxyUnits?`${d.removedProxyObjects||0} object / ${d.removedProxyFaces||0} faces`:'Missing',proxyUnits?'good':'warn');
-  setDiagnosticValue(calibrationValue,model.sourceCalibrated?(String(d.calibrationMode||'').startsWith('exact-collider-proxy')?(d.calibrationMode==='exact-collider-proxy-geometry'?'Exact proxy (geometry recovery)':'Exact UV proxy'):'Legacy'):'Missing',model.sourceCalibrated?'good':'warn');
+  const calibrationLabel=d.calibrationMode==='exact-collider-proxy-endpoints'
+    ?'Exact proxy (endpoint recovery)'
+    :d.calibrationMode==='exact-collider-proxy-geometry'
+      ?'Exact proxy (geometry recovery)'
+      :String(d.calibrationMode||'').startsWith('exact-collider-proxy')
+        ?'Exact UV proxy'
+        :'Legacy';
+  setDiagnosticValue(calibrationValue,model.sourceCalibrated?calibrationLabel:'Missing',model.sourceCalibrated?'good':'warn');
   setDiagnosticValue(matrixRecoveryValue,d.matrixFallbackUsed?'Used':'Not needed',d.matrixFallbackUsed?'good':'');
   const issues=[];
   if(!model.sourceCalibrated)issues.push('The exact collider proxy or its reserved UV metadata was not recovered. This source cannot be saved safely.');
-  if(!/^[A-Z0-9]{5}$/.test(model.sourceToken||''))issues.push('The five-character source token was not recovered.');
+  if(!/^[A-Z0-9]{5}$/.test(model.sourceToken||''))issues.push('The converter removed the five-character token; saving will use the exact Object ID instead. Do not rename the 3DS file.');
   if(!proxyUnits&&d.calibrationMode!=='legacy-markers')issues.push('No dedicated collider-proxy faces were removed from Geometry.');
   if(issues.length){sourceWarning.textContent=issues.join(' ');sourceWarning.classList.remove('hidden');}
   else{sourceWarning.textContent='';sourceWarning.classList.add('hidden');}
