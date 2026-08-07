@@ -174,7 +174,7 @@ export function normalizeManifest(m = {}, sourceBytes = null) {
     },
     editor: {
       savedAtUtc: new Date().toISOString(),
-      generator: 'ITZFENYXZ Editor 0.9.1'
+      generator: 'ITZFENYXZ Editor 0.9.2 Precision Pivot'
     }
   };
 }
@@ -293,6 +293,14 @@ const PROXY_UV_U_BASE = 9101;
 const PROXY_UV_TOKEN_BASE = 9200;
 const PROXY_UV_CHECKSUM_BASE = 9300;
 const PROXY_UV_TOLERANCE = 0.08;
+
+const COORDINATE_FRAME_NAME = 'ITZ_COORDINATE_FRAME';
+const COORDINATE_FRAME_COMPONENTS = {
+  origin: { vertices: 4, faces: 4 },
+  x: { vertices: 5, faces: 6 },
+  y: { vertices: 6, faces: 8 },
+  z: { vertices: 8, faces: 12 }
+};
 
 const WELDED_PROXY_CORNER_U = [
   9104.0,
@@ -583,6 +591,184 @@ function applyMeshMatrix(p, matrix) {
 
 function cloneObjectWithMatrixApplied(obj) {
   return { ...obj, vertices: obj.vertices.map(v => applyMeshMatrix(v, obj.meshMatrix)), meshMatrix: null };
+}
+
+function coordinateFrameCanonicalName(value) {
+  return String(value || '').trim().toUpperCase().replace(/[^A-Z0-9]+/g, '');
+}
+
+function weldObjectTopology(obj, tolerance = 1e-5) {
+  if (!obj || !obj.vertices?.length || !obj.faces?.length) return null;
+
+  const scale = 1 / tolerance;
+  const weldedPoints = [];
+  const pointMap = new Map();
+  const originalToWelded = new Array(obj.vertices.length).fill(-1);
+
+  for (let i = 0; i < obj.vertices.length; i++) {
+    const p = obj.vertices[i];
+    if (!p?.every(Number.isFinite)) return null;
+    const key = p.map(v => Math.round(v * scale)).join(',');
+    let index = pointMap.get(key);
+    if (index === undefined) {
+      index = weldedPoints.length;
+      pointMap.set(key, index);
+      weldedPoints.push([...p]);
+    }
+    originalToWelded[i] = index;
+  }
+
+  const faceRecords = [];
+  const adjacency = Array.from({ length: weldedPoints.length }, () => new Set());
+
+  for (let fi = 0; fi < obj.faces.length; fi++) {
+    const face = obj.faces[fi];
+    if (!face || face.length !== 3) continue;
+    const mapped = face.map(index => originalToWelded[index] ?? -1);
+    if (mapped.some(index => index < 0)) continue;
+    if (new Set(mapped).size < 3) continue;
+
+    faceRecords.push({ faceIndex: fi, vertices: mapped });
+    for (let i = 0; i < 3; i++) {
+      const a = mapped[i], b = mapped[(i + 1) % 3];
+      adjacency[a].add(b);
+      adjacency[b].add(a);
+    }
+  }
+
+  const visited = new Set();
+  const components = [];
+
+  for (let start = 0; start < weldedPoints.length; start++) {
+    if (visited.has(start) || adjacency[start].size === 0) continue;
+
+    const stack = [start];
+    const vertexSet = new Set();
+    visited.add(start);
+
+    while (stack.length) {
+      const current = stack.pop();
+      vertexSet.add(current);
+      for (const next of adjacency[current]) {
+        if (visited.has(next)) continue;
+        visited.add(next);
+        stack.push(next);
+      }
+    }
+
+    const faces = faceRecords.filter(record =>
+      record.vertices.every(index => vertexSet.has(index))
+    );
+
+    if (!faces.length) continue;
+
+    const points = [...vertexSet].map(index => weldedPoints[index]);
+    const center = vAverage(points);
+
+    components.push({
+      vertexCount: vertexSet.size,
+      faceCount: faces.length,
+      center,
+      faceIndices: faces.map(record => record.faceIndex),
+      vertexIndices: [...vertexSet]
+    });
+  }
+
+  return { weldedPoints, components };
+}
+
+function findGeometricCoordinateFrame(objects) {
+  const candidates = [];
+
+  for (const obj of objects) {
+    const topology = weldObjectTopology(obj);
+    if (!topology) continue;
+
+    const roles = {};
+    for (const [role, signature] of Object.entries(COORDINATE_FRAME_COMPONENTS)) {
+      const matches = topology.components.filter(component =>
+        component.vertexCount === signature.vertices &&
+        component.faceCount === signature.faces
+      );
+      if (matches.length !== 1) continue;
+      roles[role] = matches[0];
+    }
+
+    if (!roles.origin || !roles.x || !roles.y || !roles.z) continue;
+
+    const O = roles.origin.center;
+    const X = roles.x.center;
+    const Y = roles.y.center;
+    const Z = roles.z.center;
+
+    const xBasis = vSub(X, O);
+    const yBasis = vMul(vSub(Y, O), 0.5);
+    const zBasis = vMul(vSub(Z, O), 1 / 3);
+
+    let inverse;
+    try {
+      inverse = invert3x3Columns(xBasis, yBasis, zBasis);
+    } catch {
+      continue;
+    }
+
+    const map = point => transformByInverseBasis(point, O, inverse);
+    const expected = [
+      [roles.origin.center, [0, 0, 0]],
+      [roles.x.center, [1, 0, 0]],
+      [roles.y.center, [0, 2, 0]],
+      [roles.z.center, [0, 0, 3]]
+    ];
+
+    let maximumError = 0;
+    for (const [point, canonical] of expected) {
+      maximumError = Math.max(maximumError, vLen(vSub(map(point), canonical)));
+    }
+    if (!Number.isFinite(maximumError) || maximumError > 1e-4) continue;
+
+    const faceIndices = new Set([
+      ...roles.origin.faceIndices,
+      ...roles.x.faceIndices,
+      ...roles.y.faceIndices,
+      ...roles.z.faceIndices
+    ]);
+
+    const canonicalName = coordinateFrameCanonicalName(obj.name);
+    const preferredName = canonicalName === coordinateFrameCanonicalName(COORDINATE_FRAME_NAME);
+    const exactFaceCount = faceIndices.size === obj.faces.length;
+
+    candidates.push({
+      object: obj,
+      origin: O,
+      inverse,
+      faceIndices,
+      maximumError,
+      preferredName,
+      exactFaceCount,
+      determinant: inverse.determinant
+    });
+  }
+
+  if (!candidates.length) return null;
+
+  candidates.sort((a, b) => {
+    if (a.preferredName !== b.preferredName) return a.preferredName ? -1 : 1;
+    if (a.exactFaceCount !== b.exactFaceCount) return a.exactFaceCount ? -1 : 1;
+    return a.maximumError - b.maximumError;
+  });
+
+  if (candidates.length > 1) {
+    const first = candidates[0], second = candidates[1];
+    const equallyStrong =
+      first.preferredName === second.preferredName &&
+      first.exactFaceCount === second.exactFaceCount &&
+      Math.abs(first.maximumError - second.maximumError) < 1e-8;
+    if (equallyStrong) {
+      throw new Error('Multiple ambiguous ITZFENYXZ coordinate calibration frames were found in the 3DS.');
+    }
+  }
+
+  return candidates[0];
 }
 
 
@@ -1459,17 +1645,19 @@ function parseExactColliderProxy(scan,mapPoint,objects=[]) {
   return candidates[0];
 }
 
-function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
+function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coordinateFrame=null) {
   const vertices=[],indices=[],uvs=[],objectRanges=[];
   let removedMarkerObjects=0,removedMarkerFaces=0;
   let removedProxyObjects=0,removedProxyFaces=0;
   let removedColliderGeometryObjects=0,removedColliderGeometryFaces=0;
+  let removedCoordinateFrameObjects=0,removedCoordinateFrameFaces=0;
   const removedMarkerNames=new Set();
 
   const poseIndependentColliderBoxes=new Set();
   for(const obj of objects){
     if(!obj?.vertices?.length||!obj?.faces?.length)continue;
     if(proxyScan?.proxyObjects?.has(obj))continue;
+    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount)continue;
     if(canonicalLegacyMarkerName(obj.name)||parseProxyObjectToken(obj.name))continue;
     if(matchesColliderBoxShapeIgnoringPose(obj,mapPoint,colliderBase))poseIndependentColliderBoxes.add(obj);
   }
@@ -1477,6 +1665,7 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
   const hasNonBoxGeometry=objects.some(obj=>{
     if(!obj?.vertices?.length||!obj?.faces?.length)return false;
     if(proxyScan?.proxyObjects?.has(obj))return false;
+    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount)return false;
     if(canonicalLegacyMarkerName(obj.name)||parseProxyObjectToken(obj.name))return false;
     if(isReservedColliderGeometryName(obj.name))return false;
     return !poseIndependentColliderBoxes.has(obj);
@@ -1488,6 +1677,12 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
 
     const proxyObjectToken=parseProxyObjectToken(obj.name);
     if(!obj.vertices.length||!obj.faces.length)continue;
+
+    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount){
+      removedCoordinateFrameObjects++;
+      removedCoordinateFrameFaces+=obj.faces.length;
+      continue;
+    }
 
     // The exact uploaded converter welds the 36 UV-tagged proxy vertices into
     // eight shared cube corners and renames the object to Scene_2. The UV
@@ -1520,6 +1715,7 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
 
     const geometryFaces=[];
     for(let fi=0;fi<obj.faces.length;fi++){
+      if(coordinateFrame?.object===obj && coordinateFrame.faceIndices?.has(fi)){removedCoordinateFrameFaces++;continue;}
       const proxyFace=decodeProxyUvFace(obj,fi);
       if(proxyFace){removedProxyFaces++;continue;}
       const oldMaterialMarker=canonicalLegacyMarkerName(obj.faceMaterials?.[fi]);
@@ -1570,7 +1766,8 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null) {
     vertices:new Float32Array(vertices),indices:new Uint32Array(indices),normals,uvs:new Float32Array(uvs),min,max,objectRanges,
     removedMarkerObjects,removedMarkerFaces,removedMarkerNames:[...removedMarkerNames].sort(),
     removedProxyObjects,removedProxyFaces,
-    removedColliderGeometryObjects,removedColliderGeometryFaces
+    removedColliderGeometryObjects,removedColliderGeometryFaces,
+    removedCoordinateFrameObjects,removedCoordinateFrameFaces
   };
 }
 
@@ -1635,6 +1832,7 @@ export function parse3DS(input) {
   if(!objects.length)throw new Error('3DS contains no triangle-mesh objects.');
   if(masterScale!==1)for(const obj of objects)for(const v of obj.vertices){v[0]*=masterScale;v[1]*=masterScale;v[2]*=masterScale;}
 
+  const coordinateFrame=findGeometricCoordinateFrame(objects);
   let proxyScan=scanColliderProxy(objects);
   const legacyScan=scanLegacyMarkers(objects);
   const hasLegacyCalibration=[LEGACY.ORIGIN,LEGACY.AXIS_X,LEGACY.AXIS_Y,LEGACY.AXIS_Z].some(name=>!!findLegacyNamed(legacyScan.markers,name));
@@ -1644,7 +1842,7 @@ export function parse3DS(input) {
   let legacyCalibration=null;
   let matrixFallbackUsed=false;
 
-  if(hasLegacyCalibration){
+  if(!coordinateFrame&&hasLegacyCalibration){
     try{
       legacyCalibration=parseLegacyCalibration(legacyScan.markers);
     }catch(rawError){
@@ -1662,15 +1860,17 @@ export function parse3DS(input) {
   }
 
   const weldedCoordinateMap=
-    !legacyCalibration&&proxyScan?.weldedProxy
+    !coordinateFrame&&!legacyCalibration&&proxyScan?.weldedProxy
       ? createWeldedProxyCoordinateMap(proxyScan.weldedProxy)
       : null;
 
-  const mapPoint=legacyCalibration
-    ? p=>transformByInverseBasis(p,legacyCalibration.origin,legacyCalibration.inverse)
-    : weldedCoordinateMap
-      ? weldedCoordinateMap
-      : p=>legacyToEditor(p[0],p[1],p[2]);
+  const mapPoint=coordinateFrame
+    ? p=>transformByInverseBasis(p,coordinateFrame.origin,coordinateFrame.inverse)
+    : legacyCalibration
+      ? p=>transformByInverseBasis(p,legacyCalibration.origin,legacyCalibration.inverse)
+      : weldedCoordinateMap
+        ? weldedCoordinateMap
+        : p=>legacyToEditor(p[0],p[1],p[2]);
 
   if(!proxyScan)proxyScan=findEndpointColliderProxy(objects,mapPoint);
 
@@ -1682,38 +1882,50 @@ export function parse3DS(input) {
   if(proxyScan){
     colliderBase=parseExactColliderProxy(proxyScan,mapPoint,objects);
     sourceToken=proxyScan.token;
-    sourceCalibrated=true;
-    calibrationMode=proxyScan.endpointFallback
+    sourceCalibrated=!!coordinateFrame||!!legacyCalibration;
+    const proxyMode=proxyScan.endpointFallback
       ?'exact-collider-proxy-endpoints'
       :proxyScan.geometryFallback
         ?'exact-collider-proxy-geometry'
         :'exact-collider-proxy';
+    calibrationMode=coordinateFrame
+      ?`coordinate-frame+${proxyMode}`
+      :legacyCalibration
+        ?`legacy-markers+${proxyMode}`
+        :`uncalibrated-${proxyMode}`;
   }else{
     colliderBase=parseLegacyCollider(coordinateLegacyMarkers,mapPoint);
     sourceToken=parseLegacyIdentityToken(coordinateLegacyMarkers);
-    sourceCalibrated=!!legacyCalibration;
+    sourceCalibrated=!!legacyCalibration&&!!colliderBase;
     calibrationMode=legacyCalibration?'legacy-markers':'none';
   }
 
   const recoveredProxyCollider=colliderBase;
-  const combined=buildCombinedMesh(coordinateObjects,mapPoint,recoveredProxyCollider,proxyScan);
+  const combined=buildCombinedMesh(
+    coordinateObjects,
+    mapPoint,
+    recoveredProxyCollider,
+    proxyScan,
+    coordinateFrame
+  );
 
-  // The editable BoxCollider is defined from the actual visible Geometry, not
-  // from the converter-dependent proxy pose.  The minimum and maximum Geometry
-  // points are the two authoritative extremes of the model.  This produces the
-  // exact axis-aligned box the player sees in the editor and the same center /
-  // size values that are written to the .itzfenyxz patch for Unity.
+  // A saveable source uses the REAL collider proxy recovered in the same
+  // calibrated Shared Patch Root coordinate system as Geometry.  Never replace
+  // it with Geometry AABB extents: doing so loses collider orientation/pivot and
+  // can turn centimeter-converted 3DS values into enormous Unity colliders.
   const geometrySize=combined.max.map((v,i)=>Math.max(1e-4,v-combined.min[i]));
   const geometryCenter=combined.min.map((v,i)=>(v+combined.max[i])*0.5);
-  colliderBase={
-    center:geometryCenter,
-    size:geometrySize,
-    rotation:[0,0,0,1],
-    fromGeometryBounds:true,
-    proxyRecovered:!!recoveredProxyCollider
-  };
+  const displayColliderBase=sourceCalibrated&&recoveredProxyCollider
+    ?recoveredProxyCollider
+    :{
+      center:geometryCenter,
+      size:geometrySize,
+      rotation:[0,0,0,1],
+      fromGeometryBounds:true,
+      uncalibratedDisplayOnly:true
+    };
 
-  combined.colliderBase=colliderBase;
+  combined.colliderBase=displayColliderBase;
   combined.sourceToken=sourceToken;
   combined.calibrated=sourceCalibrated;
   combined.meshMatrixFallbackUsed=matrixFallbackUsed;
@@ -1734,10 +1946,15 @@ export function parse3DS(input) {
     proxyTaggedFaces:proxyScan?.proxyFaceCount||0,
     proxyToken:proxyScan?.token||'',
     calibrationMode,
+    coordinateFrameRecovered:!!coordinateFrame,
+    coordinateFrameObjectName:coordinateFrame?.object?.name||'',
+    coordinateFrameMaximumError:coordinateFrame?.maximumError??null,
+    removedCoordinateFrameObjects:combined.removedCoordinateFrameObjects||0,
+    removedCoordinateFrameFaces:combined.removedCoordinateFrameFaces||0,
     sourceObjectNames:objects.map(o=>o.name),
     matrixFallbackUsed,
     weldedProxyRecovered:!!proxyScan?.weldedProxy,
-    colliderSource:'geometry-extents-box',
+    colliderSource:sourceCalibrated&&recoveredProxyCollider?'calibrated-proxy-box':'geometry-extents-display-only',
     proxyColliderSource:proxyScan?.endpointFallback
       ?'recovered-endpoint-box'
       :proxyScan

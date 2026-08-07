@@ -141,7 +141,7 @@ function positiveScale(t){return t.scale.every(v=>Number.isFinite(v)&&v>1e-7);}
 function sourceIsSaveable(){return !!model&&model.sourceCalibrated;}
 function validateModelForSave(){
   if(!model)throw new Error('No model is loaded.');
-  if(!model.sourceCalibrated)throw new Error('This source has no valid calibrated collider proxy. Re-export the prepared FBX from Unity and convert it to 3DS again.');
+  if(!model.sourceCalibrated)throw new Error('This source has no precise Unity coordinate calibration frame and collider proxy. In Unity, normalize the ITZFENYXZ patch pivots, regenerate the export proxy/frame, export the FBX again, then convert that FBX to 3DS.');
   // A 3DS converter may destroy the ICxxxxx object name / UV token while the
   // calibrated proxy geometry still survives. Unity can safely identify the
   // patch by ObjectId when the token is absent, so saving must not be blocked.
@@ -480,21 +480,17 @@ function updateSourceDiagnostics(){
   setDiagnosticValue(geometryTrianglesValue,Number(d.triangleCount??model.mesh?.indices?.length/3??0).toLocaleString());
   setDiagnosticValue(markerCountValue,String(legacyMarkers),legacyMarkers>0?'good':'');
   setDiagnosticValue(colliderProxyValue,proxyUnits?`${d.removedProxyObjects||0} object / ${d.removedProxyFaces||0} faces`:'Missing',proxyUnits?'good':'warn');
-  const calibrationLabel=d.colliderSource==='geometry-extents-box'
-    ?'Geometry extremes (BoxCollider)'
-    :d.calibrationMode==='exact-collider-proxy-endpoints'
-      ?'Exact proxy (endpoint recovery)'
-    :d.calibrationMode==='exact-collider-proxy-geometry'
-      ?'Exact proxy (geometry recovery)'
-      :String(d.calibrationMode||'').startsWith('exact-collider-proxy')
-        ?'Exact UV proxy'
-        :'Legacy';
+  const calibrationLabel=d.coordinateFrameRecovered
+    ?'Unity coordinate frame + exact collider'
+    :String(d.calibrationMode||'').startsWith('legacy-markers')
+      ?'Legacy coordinate markers + collider'
+      :'Uncalibrated';
   setDiagnosticValue(calibrationValue,model.sourceCalibrated?calibrationLabel:'Missing',model.sourceCalibrated?'good':'warn');
   setDiagnosticValue(matrixRecoveryValue,d.matrixFallbackUsed?'Used':'Not needed',d.matrixFallbackUsed?'good':'');
   const issues=[];
-  if(!model.sourceCalibrated)issues.push('The exact collider proxy or its reserved UV metadata was not recovered. This source cannot be saved safely.');
+  if(!model.sourceCalibrated)issues.push('Precise Unity coordinate calibration is missing. This 3DS may look rotated or scaled differently from Unity and cannot be saved safely. Re-export it from Unity after generating the new coordinate frame.');
   if(!/^[A-Z0-9]{5}$/.test(model.sourceToken||''))issues.push('The converter removed the five-character token; saving will use the exact Object ID instead. Do not rename the 3DS file.');
-  if(!proxyUnits&&d.calibrationMode!=='legacy-markers')issues.push('No dedicated collider-proxy faces were removed from Geometry.');
+  if(!proxyUnits&&!String(d.calibrationMode||'').startsWith('legacy-markers'))issues.push('No dedicated collider-proxy faces were removed from Geometry.');
   if(issues.length){sourceWarning.textContent=issues.join(' ');sourceWarning.classList.remove('hidden');}
   else{sourceWarning.textContent='';sourceWarning.classList.add('hidden');}
 }
@@ -519,7 +515,7 @@ function loadParsed(mesh,sourceBytes,manifest,sourceName,kind){
     objectId:manifest?.objectId||sanitizeObjectID(sourceName),
     sourceName:sourceMeta.name||manifest?.sourceName||sourceName,
     sourceToken:sourceMeta.token||mesh.sourceToken||'',
-    sourceCalibrated:sourceMeta.calibrated===true||mesh.calibrated===true,
+    sourceCalibrated:mesh.calibrated===true,
     root:cloneTransform(manifest?.root||identityTransform()),
     visual:cloneTransform(manifest?.visual?.transform||identityTransform()),
     collider:cloneTransform(manifestCollider?.transform||identityTransform()),
@@ -534,9 +530,10 @@ function loadParsed(mesh,sourceBytes,manifest,sourceName,kind){
   const proxyUnits=(d.removedProxyObjects||0)+(d.removedProxyFaces||0);
   const legacyMarkers=(d.removedMarkerObjects||0)+(d.removedMarkerFaces||0);
   const duplicateColliderUnits=(d.removedColliderGeometryObjects||0)+(d.removedColliderGeometryFaces||0);
-  const summary=`${d.geometryObjectCount??mesh.objectRanges?.length??0} geometry object(s), ${(d.vertexCount??mesh.vertices.length/3).toLocaleString()} vertices, ${(d.triangleCount??mesh.indices.length/3).toLocaleString()} triangles, ${proxyUnits} collider-proxy unit(s) removed${duplicateColliderUnits?`, ${duplicateColliderUnits} duplicate collider unit(s) removed`:''}${legacyMarkers?`, ${legacyMarkers} legacy marker unit(s) removed`:''}`;
+  const coordinateFrameUnits=(d.removedCoordinateFrameObjects||0)+(d.removedCoordinateFrameFaces||0);
+  const summary=`${d.geometryObjectCount??mesh.objectRanges?.length??0} geometry object(s), ${(d.vertexCount??mesh.vertices.length/3).toLocaleString()} vertices, ${(d.triangleCount??mesh.indices.length/3).toLocaleString()} triangles, ${proxyUnits} collider-proxy unit(s) removed${coordinateFrameUnits?`, ${coordinateFrameUnits} coordinate-frame unit(s) removed`:''}${duplicateColliderUnits?`, ${duplicateColliderUnits} duplicate collider unit(s) removed`:''}${legacyMarkers?`, ${legacyMarkers} legacy marker unit(s) removed`:''}`;
   const warnings=[];
-  if(!model.sourceCalibrated)warnings.push('exact collider proxy missing');
+  if(!model.sourceCalibrated)warnings.push('precise Unity coordinate frame missing');
   if(!model.sourceToken)warnings.push('identity token missing');
   if(!proxyUnits&&d.calibrationMode!=='legacy-markers')warnings.push('no collider proxy removed');
   const recovery=d.matrixFallbackUsed?' — MESH_MATRIX recovery used':'';
