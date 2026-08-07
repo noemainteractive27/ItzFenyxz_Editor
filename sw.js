@@ -1,10 +1,10 @@
-const CACHE = 'itzfenyxz-editor-0.9.2c-converter-robust-v2';
+const CACHE = 'itzfenyxz-editor-0.9.2e-exact-3ds-v1';
 const ASSETS = [
   './',
   './index.html',
   './styles.css',
-  './app.js?v=0.9.2c-converter-robust-2',
-  './core.js?v=0.9.2c-converter-robust-2',
+  './app.js?v=0.9.2e-exact-3ds-1',
+  './core.js?v=0.9.2e-exact-3ds-1',
   './icon.png',
   './help.pdf',
   './manifest.webmanifest'

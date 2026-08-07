@@ -1,4 +1,4 @@
-import { parse3DS, encodeITZF, decodeITZF, identityTransform, cloneTransform, sanitizeObjectID } from './core.js?v=0.9.2c-converter-robust-2';
+import { parse3DS, encodeITZF, decodeITZF, identityTransform, cloneTransform, sanitizeObjectID } from './core.js?v=0.9.2e-embedded-calibration-1';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('viewport');
@@ -141,7 +141,7 @@ function positiveScale(t){return t.scale.every(v=>Number.isFinite(v)&&v>1e-7);}
 function sourceIsSaveable(){return !!model&&model.sourceCalibrated;}
 function validateModelForSave(){
   if(!model)throw new Error('No model is loaded.');
-  if(!model.sourceCalibrated)throw new Error('This 3DS does not contain enough recoverable Unity calibration data to save safely. The editor now accepts calibration helpers that were renamed, split, or merged by FBX-to-3DS conversion; if this still appears, the converter physically removed the helper geometry.');
+  if(!model.sourceCalibrated)throw new Error('ITZ-E1201: Source calibration data is missing or invalid.');
   // A 3DS converter may destroy the ICxxxxx object name / UV token while the
   // calibrated proxy geometry still survives. Unity can safely identify the
   // patch by ObjectId when the token is absent, so saving must not be blocked.

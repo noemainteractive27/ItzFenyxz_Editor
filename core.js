@@ -520,6 +520,14 @@ function readCString(bytes, off, limit) {
 }
 
 function legacyToEditor(x, y, z) { return [x, z, -y]; }
+
+// Unity's FBX Exporter writes this project's source meshes in centimeters,
+// with the X axis mirrored while Y and Z remain in Unity orientation.
+// The ICxxxxx proxy UV signature identifies sources authored by the Unity
+// ITZFENYXZ exporter, so this mapping is deterministic for that source type.
+function unityFbxCentimetersToUnity(p) {
+  return [-p[0] * 0.01, p[1] * 0.01, p[2] * 0.01];
+}
 function vAdd(a,b){return [a[0]+b[0],a[1]+b[1],a[2]+b[2]];}
 function vSub(a,b){return [a[0]-b[0],a[1]-b[1],a[2]-b[2]];}
 function vMul(a,s){return [a[0]*s,a[1]*s,a[2]*s];}
@@ -581,11 +589,15 @@ function quatFromBasis(xAxis, yAxis, zAxis) {
 function applyMeshMatrix(p, matrix) {
   if (!matrix) return [...p];
   const [x,y,z]=p;
-  const ax=matrix.slice(0,3),ay=matrix.slice(3,6),az=matrix.slice(6,9),origin=matrix.slice(9,12);
+  const origin=matrix.slice(9,12);
+
+  // 3DS MESH_MATRIX (0x4160) stores the three basis rows followed by
+  // the object origin.  Treating the first nine values as columns
+  // transposes rotations and moves pivots onto the wrong axes.
   return [
-    origin[0]+ax[0]*x+ay[0]*y+az[0]*z,
-    origin[1]+ax[1]*x+ay[1]*y+az[1]*z,
-    origin[2]+ax[2]*x+ay[2]*y+az[2]*z
+    origin[0] + matrix[0]*x + matrix[1]*y + matrix[2]*z,
+    origin[1] + matrix[3]*x + matrix[4]*y + matrix[5]*z,
+    origin[2] + matrix[6]*x + matrix[7]*y + matrix[8]*z
   ];
 }
 
@@ -1180,14 +1192,38 @@ function decodeProxyUvFace(obj, faceIndex) {
   }
 
   const averageU=(points[0][0]+points[1][0]+points[2][0])/3;
-  const averageV=(points[0][1]+points[1][1]+points[2][1])/3;
+  const rawAverageV=(points[0][1]+points[1][1]+points[2][1])/3;
+
+  // Some FBX->3DS converters apply the ordinary texture-coordinate
+  // convention V' = 1 - V. Reserved ITZFENYXZ metadata lives far outside
+  // normal UV ranges, so test both representations deterministically.
+  const vCandidates=[rawAverageV,1-rawAverageV];
+  let averageV=rawAverageV;
+  const looksLikeReservedV=value=>
+    (value>=PROXY_UV_TOKEN_BASE-PROXY_UV_TOLERANCE &&
+     value<=PROXY_UV_TOKEN_BASE+PROXY_TOKEN_ALPHABET.length-1+PROXY_UV_TOLERANCE) ||
+    (value>=PROXY_UV_CHECKSUM_BASE-PROXY_UV_TOLERANCE &&
+     value<=PROXY_UV_CHECKSUM_BASE+PROXY_TOKEN_ALPHABET.length-1+PROXY_UV_TOLERANCE);
+
+  if(!looksLikeReservedV(averageV)){
+    const recovered=vCandidates.find(looksLikeReservedV);
+    if(recovered!==undefined)averageV=recovered;
+  }
+
   const slot=Math.round(averageU-PROXY_UV_U_BASE);
   if(slot<0||slot>=PROXY_FACE_TAGS.length)return null;
   const expectedU=PROXY_UV_U_BASE+slot;
   if(Math.abs(averageU-expectedU)>PROXY_UV_TOLERANCE)return null;
   for(const uv of points){
+    const normalizedV=
+      Math.abs(uv[1]-averageV)<=PROXY_UV_TOLERANCE
+        ?uv[1]
+        :(Math.abs((1-uv[1])-averageV)<=PROXY_UV_TOLERANCE
+          ?1-uv[1]
+          :NaN);
+
     if(Math.abs(uv[0]-expectedU)>PROXY_UV_TOLERANCE||
-       Math.abs(uv[1]-averageV)>PROXY_UV_TOLERANCE)return null;
+       !Number.isFinite(normalizedV))return null;
   }
 
   if(slot<5){
@@ -1427,7 +1463,17 @@ function scanColliderProxy(objects) {
 
   const proxyObjects=new Set(namedProxyObjects);
 
-  return {token,taggedFaces,proxyObjectCount,proxyFaceCount,proxyObjects};
+  return {
+    token,
+    taggedFaces,
+    proxyObjectCount,
+    proxyFaceCount,
+    proxyObjects,
+    // Full six-face UV metadata + valid token/checksum means this is a
+    // canonical Unity-authored source proxy, even if an FBX->3DS converter
+    // removed the separate coordinate-frame helper object.
+    unityFbxUvCalibration:true
+  };
 }
 
 function uniqueMappedFacePoints(faceRefs, tag, mapPoint, applyObjectMatrix=true) {
@@ -1994,11 +2040,15 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coo
     for(const oldIndex of sorted){
       const newIndex=vertices.length/3;
       remap.set(oldIndex,newIndex);
-      // 3DS MESH_MATRIX is an object coordinate-system descriptor for the
-      // converters used by this pipeline. Applying it again to visible Geometry
-      // rotates/translates the model a second time. Proxy parsing still consumes
-      // the matrix because its pivot is intentionally stored there.
-      const v=mapPoint(obj.vertices[oldIndex]);
+      // Visible Geometry must be reconstructed in Shared Patch Root space.
+      // POINT_ARRAY is mesh-local in the actual converted files and MESH_MATRIX
+      // carries the authored child TRS.  Ignoring it makes the editor pivot
+      // differ from Unity and turns edits on one axis into motion on another.
+      const sourcePoint=applyMeshMatrix(
+        obj.vertices[oldIndex],
+        obj.meshMatrix
+      );
+      const v=mapPoint(sourcePoint);
       vertices.push(v[0],v[1],v[2]);
       const uv=obj.uvs.length===obj.vertices.length?obj.uvs[oldIndex]:[0,0];
       uvs.push(uv[0],uv[1]);
@@ -2123,13 +2173,21 @@ export function parse3DS(input) {
       ? createWeldedProxyCoordinateMap(proxyScan.weldedProxy)
       : null;
 
+  const unityFbxUvCalibration =
+    !coordinateFrame &&
+    !legacyCalibration &&
+    !weldedCoordinateMap &&
+    proxyScan?.unityFbxUvCalibration === true;
+
   const mapPoint=coordinateFrame
     ? p=>transformByInverseBasis(p,coordinateFrame.origin,coordinateFrame.inverse)
     : legacyCalibration
       ? p=>transformByInverseBasis(p,legacyCalibration.origin,legacyCalibration.inverse)
       : weldedCoordinateMap
         ? weldedCoordinateMap
-        : p=>legacyToEditor(p[0],p[1],p[2]);
+        : unityFbxUvCalibration
+          ? p=>unityFbxCentimetersToUnity(p)
+          : p=>legacyToEditor(p[0],p[1],p[2]);
 
   if(!proxyScan)proxyScan=findEndpointColliderProxy(objects,mapPoint,coordinateFrame);
 
@@ -2141,17 +2199,24 @@ export function parse3DS(input) {
   if(proxyScan){
     colliderBase=parseExactColliderProxy(proxyScan,mapPoint,objects);
     sourceToken=proxyScan.token;
-    sourceCalibrated=!!coordinateFrame||!!legacyCalibration;
+    sourceCalibrated=
+      !!coordinateFrame ||
+      !!legacyCalibration ||
+      unityFbxUvCalibration;
+
     const proxyMode=proxyScan.endpointFallback
       ?'exact-collider-proxy-endpoints'
       :proxyScan.geometryFallback
         ?'exact-collider-proxy-geometry'
         :'exact-collider-proxy';
+
     calibrationMode=coordinateFrame
       ?`coordinate-frame+${proxyMode}`
       :legacyCalibration
         ?`legacy-markers+${proxyMode}`
-        :`uncalibrated-${proxyMode}`;
+        :unityFbxUvCalibration
+          ?`unity-fbx-cm-uv+${proxyMode}`
+          :`uncalibrated-${proxyMode}`;
   }else{
     colliderBase=parseLegacyCollider(coordinateLegacyMarkers,mapPoint);
     sourceToken=parseLegacyIdentityToken(coordinateLegacyMarkers);
