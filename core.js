@@ -677,94 +677,232 @@ function weldObjectTopology(obj, tolerance = 1e-5) {
   return { weldedPoints, components };
 }
 
+function coordinateFrameFaceSet(frame, obj) {
+  if (!frame || !obj) return null;
+  if (frame.faceRefs instanceof Map) return frame.faceRefs.get(obj) || null;
+  if (frame.object === obj && frame.faceIndices) return frame.faceIndices;
+  return null;
+}
+
+function coordinateFrameConsumesObject(frame, obj) {
+  const refs = coordinateFrameFaceSet(frame, obj);
+  return !!refs && refs.size === obj.faces.length;
+}
+
+function componentRadius(topology, component) {
+  if (!topology || !component) return 0;
+  let maximum = 0;
+  for (const index of component.vertexIndices || []) {
+    const point = topology.weldedPoints[index];
+    if (!point) continue;
+    maximum = Math.max(maximum, vLen(vSub(point, component.center)));
+  }
+  return maximum;
+}
+
+function buildCoordinateFrameCandidate(roleRefs) {
+  const O = roleRefs.origin.component.center;
+  const X = roleRefs.x.component.center;
+  const Y = roleRefs.y.component.center;
+  const Z = roleRefs.z.component.center;
+
+  const rawX = vSub(X, O);
+  const rawY = vSub(Y, O);
+  const rawZ = vSub(Z, O);
+
+  const xBasis = rawX;
+  const yBasis = vMul(rawY, 0.5);
+  const zBasis = vMul(rawZ, 1 / 3);
+
+  const lengths = [vLen(xBasis), vLen(yBasis), vLen(zBasis)];
+  if (Math.min(...lengths) < 1e-8 || !lengths.every(Number.isFinite)) return null;
+
+  const nx = vNorm(xBasis), ny = vNorm(yBasis), nz = vNorm(zBasis);
+  const orthogonalityError = Math.max(
+    Math.abs(vDot(nx, ny)),
+    Math.abs(vDot(nx, nz)),
+    Math.abs(vDot(ny, nz))
+  );
+
+  // FBX -> 3DS converters may swap/mirror axes and rescale them, but they
+  // should not turn an orthogonal Unity calibration frame into a sheared one.
+  if (orthogonalityError > 0.12) return null;
+
+  let inverse;
+  try {
+    inverse = invert3x3Columns(xBasis, yBasis, zBasis);
+  } catch {
+    return null;
+  }
+
+  const radii = Object.values(roleRefs).map(ref =>
+    componentRadius(ref.topology, ref.component)
+  );
+  const smallestBasis = Math.min(...lengths);
+  const largestMarker = Math.max(...radii, 0);
+
+  // The calibration solids are intentionally tiny compared with the 1/2/3
+  // unit anchor spacing. This rejects ordinary tetrahedra/cubes in a model.
+  if (largestMarker > 0 && smallestBasis < largestMarker * 5.0) return null;
+
+  const faceRefs = new Map();
+  const frameObjects = new Set();
+  for (const ref of Object.values(roleRefs)) {
+    frameObjects.add(ref.obj);
+    let set = faceRefs.get(ref.obj);
+    if (!set) {
+      set = new Set();
+      faceRefs.set(ref.obj, set);
+    }
+    for (const fi of ref.component.faceIndices) set.add(fi);
+  }
+
+  const sameObject = frameObjects.size === 1;
+  let preferredName = false;
+  for (const obj of frameObjects) {
+    if (coordinateFrameCanonicalName(obj.name) ===
+        coordinateFrameCanonicalName(COORDINATE_FRAME_NAME)) {
+      preferredName = true;
+      break;
+    }
+  }
+
+  const exactObjects = new Set();
+  for (const obj of frameObjects) {
+    const refs = faceRefs.get(obj);
+    if (refs && refs.size === obj.faces.length) exactObjects.add(obj);
+  }
+
+  // Prefer the four helpers remaining together, then exact/small helper
+  // objects, then the most orthogonal result. The scale-spread term is only a
+  // tiebreaker because some converters apply different axis scales.
+  const scaleSpread =
+    Math.log(Math.max(...lengths) / Math.max(1e-12, Math.min(...lengths)));
+  const totalObjectFaces = [...frameObjects]
+    .reduce((sum, obj) => sum + (obj.faces?.length || 0), 0);
+
+  let score =
+    orthogonalityError * 100 +
+    scaleSpread * 0.25 +
+    Math.min(totalObjectFaces, 10000) * 0.0001;
+
+  if (sameObject) score -= 6;
+  if (preferredName) score -= 20;
+  score -= exactObjects.size * 1.5;
+
+  return {
+    object: sameObject ? [...frameObjects][0] : null,
+    objects: frameObjects,
+    origin: O,
+    inverse,
+    faceRefs,
+    faceIndices: sameObject ? faceRefs.get([...frameObjects][0]) : null,
+    maximumError: orthogonalityError,
+    preferredName,
+    exactFaceCount: sameObject && exactObjects.size === 1,
+    exactObjects,
+    determinant: inverse.determinant,
+    score,
+    roleRefs
+  };
+}
+
 function findGeometricCoordinateFrame(objects) {
-  const candidates = [];
+  const roleCandidates = {
+    origin: [],
+    x: [],
+    y: [],
+    z: []
+  };
 
   for (const obj of objects) {
     const topology = weldObjectTopology(obj);
     if (!topology) continue;
 
-    const roles = {};
     for (const [role, signature] of Object.entries(COORDINATE_FRAME_COMPONENTS)) {
-      const matches = topology.components.filter(component =>
-        component.vertexCount === signature.vertices &&
-        component.faceCount === signature.faces
-      );
-      if (matches.length !== 1) continue;
-      roles[role] = matches[0];
+      for (const component of topology.components) {
+        if (component.vertexCount !== signature.vertices ||
+            component.faceCount !== signature.faces) {
+          continue;
+        }
+
+        // Huge visible meshes can contain incidental small disconnected solids.
+        // Keep them as a last resort only when the object name explicitly
+        // identifies the coordinate frame.
+        const preferredObject =
+          coordinateFrameCanonicalName(obj.name) ===
+          coordinateFrameCanonicalName(COORDINATE_FRAME_NAME);
+
+        if ((obj.faces?.length || 0) > 160 && !preferredObject) continue;
+
+        roleCandidates[role].push({
+          obj,
+          topology,
+          component,
+          preferredObject
+        });
+      }
     }
+  }
 
-    if (!roles.origin || !roles.x || !roles.y || !roles.z) continue;
+  if (!roleCandidates.origin.length ||
+      !roleCandidates.x.length ||
+      !roleCandidates.y.length ||
+      !roleCandidates.z.length) {
+    return null;
+  }
 
-    const O = roles.origin.center;
-    const X = roles.x.center;
-    const Y = roles.y.center;
-    const Z = roles.z.center;
+  // Keep the search bounded even if a converter creates many tiny helper
+  // objects. Preferred/small objects are tried first.
+  const rank = ref => [
+    ref.preferredObject ? 0 : 1,
+    ref.obj.faces?.length || 0,
+    ref.obj.vertices?.length || 0
+  ];
 
-    const xBasis = vSub(X, O);
-    const yBasis = vMul(vSub(Y, O), 0.5);
-    const zBasis = vMul(vSub(Z, O), 1 / 3);
-
-    let inverse;
-    try {
-      inverse = invert3x3Columns(xBasis, yBasis, zBasis);
-    } catch {
-      continue;
-    }
-
-    const map = point => transformByInverseBasis(point, O, inverse);
-    const expected = [
-      [roles.origin.center, [0, 0, 0]],
-      [roles.x.center, [1, 0, 0]],
-      [roles.y.center, [0, 2, 0]],
-      [roles.z.center, [0, 0, 3]]
-    ];
-
-    let maximumError = 0;
-    for (const [point, canonical] of expected) {
-      maximumError = Math.max(maximumError, vLen(vSub(map(point), canonical)));
-    }
-    if (!Number.isFinite(maximumError) || maximumError > 1e-4) continue;
-
-    const faceIndices = new Set([
-      ...roles.origin.faceIndices,
-      ...roles.x.faceIndices,
-      ...roles.y.faceIndices,
-      ...roles.z.faceIndices
-    ]);
-
-    const canonicalName = coordinateFrameCanonicalName(obj.name);
-    const preferredName = canonicalName === coordinateFrameCanonicalName(COORDINATE_FRAME_NAME);
-    const exactFaceCount = faceIndices.size === obj.faces.length;
-
-    candidates.push({
-      object: obj,
-      origin: O,
-      inverse,
-      faceIndices,
-      maximumError,
-      preferredName,
-      exactFaceCount,
-      determinant: inverse.determinant
+  for (const role of Object.keys(roleCandidates)) {
+    roleCandidates[role].sort((a, b) => {
+      const ra = rank(a), rb = rank(b);
+      for (let i = 0; i < ra.length; i++) {
+        if (ra[i] !== rb[i]) return ra[i] - rb[i];
+      }
+      return 0;
     });
+    roleCandidates[role] = roleCandidates[role].slice(0, 16);
+  }
+
+  const candidates = [];
+  for (const origin of roleCandidates.origin) {
+    for (const x of roleCandidates.x) {
+      if (x.obj === origin.obj && x.component === origin.component) continue;
+      for (const y of roleCandidates.y) {
+        if ((y.obj === origin.obj && y.component === origin.component) ||
+            (y.obj === x.obj && y.component === x.component)) continue;
+        for (const z of roleCandidates.z) {
+          if ((z.obj === origin.obj && z.component === origin.component) ||
+              (z.obj === x.obj && z.component === x.component) ||
+              (z.obj === y.obj && z.component === y.component)) continue;
+
+          const candidate = buildCoordinateFrameCandidate({ origin, x, y, z });
+          if (candidate) candidates.push(candidate);
+        }
+      }
+    }
   }
 
   if (!candidates.length) return null;
-
-  candidates.sort((a, b) => {
-    if (a.preferredName !== b.preferredName) return a.preferredName ? -1 : 1;
-    if (a.exactFaceCount !== b.exactFaceCount) return a.exactFaceCount ? -1 : 1;
-    return a.maximumError - b.maximumError;
-  });
+  candidates.sort((a, b) => a.score - b.score);
 
   if (candidates.length > 1) {
     const first = candidates[0], second = candidates[1];
-    const equallyStrong =
-      first.preferredName === second.preferredName &&
-      first.exactFaceCount === second.exactFaceCount &&
-      Math.abs(first.maximumError - second.maximumError) < 1e-8;
-    if (equallyStrong) {
-      throw new Error('Multiple ambiguous ITZFENYXZ coordinate calibration frames were found in the 3DS.');
+    if (Math.abs(first.score - second.score) < 1e-5) {
+      const firstKey = [...first.objects].map(obj => obj.name).sort().join('|');
+      const secondKey = [...second.objects].map(obj => obj.name).sort().join('|');
+      if (firstKey !== secondKey) {
+        throw new Error(
+          'Multiple equally plausible ITZFENYXZ coordinate calibration frames were found after 3DS conversion.'
+        );
+      }
     }
   }
 
@@ -1426,23 +1564,96 @@ function boundsIntersectionRatio(a,b){
   return intersection/smaller;
 }
 
-function findEndpointColliderProxy(objects,mapPoint){
+function extractObjectFaceSubset(obj, faceIndices, suffix = 'subset') {
+  if (!obj || !faceIndices || !faceIndices.size) return null;
+  const used = new Set();
+  const selectedFaces = [];
+
+  for (const fi of faceIndices) {
+    const face = obj.faces?.[fi];
+    if (!face || face.length !== 3) continue;
+    selectedFaces.push(face);
+    for (const index of face) used.add(index);
+  }
+
+  if (!selectedFaces.length) return null;
+
+  const sorted = [...used].sort((a, b) => a - b);
+  const remap = new Map();
+  const vertices = [];
+  const uvs = [];
+
+  for (const oldIndex of sorted) {
+    remap.set(oldIndex, vertices.length);
+    vertices.push([...obj.vertices[oldIndex]]);
+    if (obj.uvs?.length === obj.vertices.length) {
+      uvs.push([...obj.uvs[oldIndex]]);
+    }
+  }
+
+  return {
+    name: `${obj.name || 'Object'}_${suffix}`,
+    vertices,
+    faces: selectedFaces.map(face => face.map(index => remap.get(index))),
+    uvs,
+    faceMaterials: new Array(selectedFaces.length).fill(''),
+    meshMatrix: obj.meshMatrix || null,
+    __sourceObject: obj,
+    __sourceFaceIndices: new Set(faceIndices)
+  };
+}
+
+function findEndpointColliderProxy(objects,mapPoint,coordinateFrame=null){
   const candidates=[];
+
+  function addCandidate(candidateObject, ownerObject, faceIndices, wholeObject){
+    if(!candidateObject?.vertices?.length||!candidateObject?.faces?.length)return;
+    const recovered=recoverColliderFromProxyGeometry(candidateObject,mapPoint);
+    if(!recovered)return;
+    candidates.push({
+      obj:candidateObject,
+      owner:ownerObject||candidateObject,
+      faceIndices:faceIndices||null,
+      wholeObject:!!wholeObject,
+      recovered,
+      bounds:colliderBounds(recovered)
+    });
+  }
+
   for(const obj of objects){
     if(!obj?.vertices?.length||!obj?.faces?.length)continue;
-    if(obj.faces.length<10||obj.faces.length>24)continue;
-    const recovered=recoverColliderFromProxyGeometry(obj,mapPoint);
-    if(!recovered)continue;
-    candidates.push({obj,recovered,bounds:colliderBounds(recovered)});
+
+    // Original path: a converter kept the proxy as one standalone box object.
+    if(obj.faces.length>=10&&obj.faces.length<=24){
+      addCandidate(obj,obj,null,true);
+    }
+
+    // Robust path: converters often merge ICxxxxx + ITZ_COORDINATE_FRAME into
+    // one Scene_N helper or split the helper into several objects. Search every
+    // welded 8-vertex/12-triangle connected component and exclude the cube that
+    // belongs to the 1/2/3 coordinate frame itself.
+    if((obj.faces?.length||0)<=200){
+      const topology=weldObjectTopology(obj);
+      if(topology){
+        const frameFaces=coordinateFrameFaceSet(coordinateFrame,obj);
+        for(let ci=0;ci<topology.components.length;ci++){
+          const component=topology.components[ci];
+          if(component.vertexCount!==8||component.faceCount!==12)continue;
+
+          const faceSet=new Set(component.faceIndices);
+          if(frameFaces&&[...faceSet].every(fi=>frameFaces.has(fi)))continue;
+
+          const subset=extractObjectFaceSubset(obj,faceSet,`box_${ci}`);
+          if(subset)addCandidate(subset,obj,faceSet,false);
+        }
+      }
+    }
   }
+
   if(!candidates.length)return null;
 
-  // A real export proxy is a tiny twelve-triangle helper next to substantially
-  // more detailed visible Geometry. This prevents ordinary box-shaped models
-  // from being silently mistaken for collider metadata.
   const detailedObjects=objects.filter(obj=>
     obj?.vertices?.length&&obj?.faces?.length&&
-    !candidates.some(candidate=>candidate.obj===obj)&&
     (obj.faces.length>24||obj.vertices.length>16)
   );
   if(!detailedObjects.length)return null;
@@ -1452,12 +1663,39 @@ function findEndpointColliderProxy(objects,mapPoint){
   for(const candidate of candidates){
     const restPoints=[];
     for(const obj of objects){
-      if(obj===candidate.obj||!obj?.vertices?.length)continue;
-      for(const vertex of obj.vertices){
-        const point=mapPoint(vertex);
-        if(point.every(Number.isFinite))restPoints.push(point);
+      if(!obj?.vertices?.length)continue;
+
+      const frameFaces=coordinateFrameFaceSet(coordinateFrame,obj);
+      const candidateFaces=
+        candidate.owner===obj && candidate.faceIndices
+          ? candidate.faceIndices
+          : null;
+
+      if(candidate.wholeObject && candidate.owner===obj)continue;
+
+      // When the helper is merged with visible geometry, build the reference
+      // bounds from only the faces/vertices that are not metadata.
+      const excludedVertices=new Set();
+      if(frameFaces||candidateFaces){
+        const excludedFaces=new Set([
+          ...(frameFaces||[]),
+          ...(candidateFaces||[])
+        ]);
+        const includedFaces=(obj.faces||[]).filter((_,fi)=>!excludedFaces.has(fi));
+        const used=new Set();
+        for(const face of includedFaces)for(const vi of face)used.add(vi);
+        for(const vi of used){
+          const point=mapPoint(obj.vertices[vi]);
+          if(point.every(Number.isFinite))restPoints.push(point);
+        }
+      }else{
+        for(const vertex of obj.vertices){
+          const point=mapPoint(vertex);
+          if(point.every(Number.isFinite))restPoints.push(point);
+        }
       }
     }
+
     if(!restPoints.length)continue;
     const restMin=[Infinity,Infinity,Infinity],restMax=[-Infinity,-Infinity,-Infinity];
     for(const point of restPoints)for(let axis=0;axis<3;axis++){
@@ -1476,30 +1714,45 @@ function findEndpointColliderProxy(objects,mapPoint){
     const longestCandidate=Math.max(...candidate.recovered.size);
     const longestRest=Math.max(...rest.size,1e-6);
     const lengthScore=Math.max(0,1-Math.abs(Math.log(longestCandidate/longestRest))/Math.log(4));
-    const score=overlapScore*4+centerScore*2+lengthScore;
+
+    let score=overlapScore*4+centerScore*2+lengthScore;
+    if(candidate.wholeObject)score+=0.15;
+    if(parseProxyObjectToken(candidate.owner?.name))score+=2.0;
+
     const scoredCandidate={...candidate,score};
     scored.push(scoredCandidate);
     if(!best||score>best.score)best=scoredCandidate;
   }
 
-  if(!best||best.score<2.15)return null;
+  if(!best||best.score<1.9)return null;
   const second=scored
-    .filter(candidate=>candidate.obj!==best.obj)
+    .filter(candidate=>candidate!==best)
     .map(candidate=>candidate.score)
     .sort((a,b)=>b-a)[0];
-  if(Number.isFinite(second)&&best.score-second<0.15)return null;
+  if(Number.isFinite(second)&&best.score-second<0.08)return null;
+
+  const proxyObjects=new Set();
+  const proxyFaceRefs=new Map();
+
+  if(best.wholeObject){
+    proxyObjects.add(best.owner);
+  }else if(best.faceIndices){
+    proxyFaceRefs.set(best.owner,new Set(best.faceIndices));
+  }
 
   return {
-    token:parseProxyObjectToken(best.obj.name)||'',
+    token:parseProxyObjectToken(best.owner?.name)||'',
     taggedFaces:[],
     proxyObjectCount:1,
     proxyFaceCount:best.obj.faces.length,
-    proxyObjects:new Set([best.obj]),
+    proxyObjects,
+    proxyFaceRefs,
     geometryFallback:true,
     endpointFallback:true,
     recoveredCollider:best.recovered
   };
 }
+
 
 function parseExactColliderProxy(scan,mapPoint,objects=[]) {
   if(!scan)return null;
@@ -1509,9 +1762,13 @@ function parseExactColliderProxy(scan,mapPoint,objects=[]) {
   if(scan.geometryFallback){
     const referenceBounds=combinedMappedBounds(objects,mapPoint,scan.proxyObjects||new Set());
     if(scan.recoveredCollider){
-      const collider=recoverColliderFromProxyGeometry(
-        [...(scan.proxyObjects||[])][0],mapPoint,referenceBounds
-      )||scan.recoveredCollider;
+      let collider=scan.recoveredCollider;
+      const standalone=[...(scan.proxyObjects||[])][0];
+      if(standalone){
+        collider=recoverColliderFromProxyGeometry(
+          standalone,mapPoint,referenceBounds
+        )||collider;
+      }
       return {...collider,token:scan.token||''};
     }
     const recovered=[];
@@ -1657,7 +1914,7 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coo
   for(const obj of objects){
     if(!obj?.vertices?.length||!obj?.faces?.length)continue;
     if(proxyScan?.proxyObjects?.has(obj))continue;
-    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount)continue;
+    if(coordinateFrameConsumesObject(coordinateFrame,obj))continue;
     if(canonicalLegacyMarkerName(obj.name)||parseProxyObjectToken(obj.name))continue;
     if(matchesColliderBoxShapeIgnoringPose(obj,mapPoint,colliderBase))poseIndependentColliderBoxes.add(obj);
   }
@@ -1665,7 +1922,7 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coo
   const hasNonBoxGeometry=objects.some(obj=>{
     if(!obj?.vertices?.length||!obj?.faces?.length)return false;
     if(proxyScan?.proxyObjects?.has(obj))return false;
-    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount)return false;
+    if(coordinateFrameConsumesObject(coordinateFrame,obj))return false;
     if(canonicalLegacyMarkerName(obj.name)||parseProxyObjectToken(obj.name))return false;
     if(isReservedColliderGeometryName(obj.name))return false;
     return !poseIndependentColliderBoxes.has(obj);
@@ -1678,7 +1935,7 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coo
     const proxyObjectToken=parseProxyObjectToken(obj.name);
     if(!obj.vertices.length||!obj.faces.length)continue;
 
-    if(coordinateFrame?.object===obj && coordinateFrame.exactFaceCount){
+    if(coordinateFrameConsumesObject(coordinateFrame,obj)){
       removedCoordinateFrameObjects++;
       removedCoordinateFrameFaces+=obj.faces.length;
       continue;
@@ -1715,7 +1972,9 @@ function buildCombinedMesh(objects,mapPoint,colliderBase=null,proxyScan=null,coo
 
     const geometryFaces=[];
     for(let fi=0;fi<obj.faces.length;fi++){
-      if(coordinateFrame?.object===obj && coordinateFrame.faceIndices?.has(fi)){removedCoordinateFrameFaces++;continue;}
+      if(coordinateFrameFaceSet(coordinateFrame,obj)?.has(fi)){removedCoordinateFrameFaces++;continue;}
+      const proxyFaceRefs=proxyScan?.proxyFaceRefs?.get(obj);
+      if(proxyFaceRefs?.has(fi)){removedProxyFaces++;continue;}
       const proxyFace=decodeProxyUvFace(obj,fi);
       if(proxyFace){removedProxyFaces++;continue;}
       const oldMaterialMarker=canonicalLegacyMarkerName(obj.faceMaterials?.[fi]);
@@ -1872,7 +2131,7 @@ export function parse3DS(input) {
         ? weldedCoordinateMap
         : p=>legacyToEditor(p[0],p[1],p[2]);
 
-  if(!proxyScan)proxyScan=findEndpointColliderProxy(objects,mapPoint);
+  if(!proxyScan)proxyScan=findEndpointColliderProxy(objects,mapPoint,coordinateFrame);
 
   let colliderBase=null;
   let sourceToken='';
@@ -1947,8 +2206,9 @@ export function parse3DS(input) {
     proxyToken:proxyScan?.token||'',
     calibrationMode,
     coordinateFrameRecovered:!!coordinateFrame,
-    coordinateFrameObjectName:coordinateFrame?.object?.name||'',
+    coordinateFrameObjectName:coordinateFrame ? [...(coordinateFrame.objects||new Set(coordinateFrame.object?[coordinateFrame.object]:[]))].map(o=>o.name).join(' + ') : '',
     coordinateFrameMaximumError:coordinateFrame?.maximumError??null,
+    coordinateFrameObjectCount:coordinateFrame?.objects?.size??(coordinateFrame?.object?1:0),
     removedCoordinateFrameObjects:combined.removedCoordinateFrameObjects||0,
     removedCoordinateFrameFaces:combined.removedCoordinateFrameFaces||0,
     sourceObjectNames:objects.map(o=>o.name),
